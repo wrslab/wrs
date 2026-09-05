@@ -1,0 +1,130 @@
+import builtins
+import numpy as np
+
+import wrs.utils.math as wum
+import wrs.utils.constant as wuc
+import wrs.viewer.world as wvw
+import wrs.scene.scene_object_primitive as wssop
+import wrs.motion.interpolation.cartesian as wmic
+import wrs.motion.trajectory.time_param as wmttp
+import wrs.robots.manipulators.kawasaki.rs007l.rs007l as wrmkr7
+import wrs.robots.end_effectors.onrobot.or_sd.or_sd as wreorsd
+
+
+if __name__ == '__main__':
+    base = wvw.World(cam_pos=(2.0, 0.8, 1.6), cam_lookat_pos=(0.0, 0.0, 0.7))
+    builtins.base = base
+    scene = base.scene
+    wssop.frame().add_to_scene(scene)
+
+    robot = wrmkr7.RS007L()
+    robot.add_to_scene(scene)
+    builtins.robot = robot
+
+    screwdriver = wreorsd.ORSD()
+    screwdriver.add_to_scene(scene)
+    robot.mount(screwdriver, robot.runtime_lnks[-1],
+                wum.tf_from_pos_rotmat(pos=(0.0, 0.0, 0.05)), update=True)
+
+    # find a reachable start tcp first (for ORSD this is stricter than 2FG7)
+    start_rotmat = wum.rotmat_from_euler(wum.pi, 0.0, wum.pi)
+    start_pos = np.array([0.45, -0.35, 0.15], dtype=np.float32)
+    # bias the start config toward joint mid-range: a start near a joint limit
+    # (e.g. j4 at its edge) forces a ~2pi unwind mid-trajectory (visible flip).
+    mid_qs = ((robot.chain('main').lmt_lo + robot.chain('main').lmt_up)
+              * 0.5).astype(np.float32)
+    _s = robot.ik(start_pos, start_rotmat, tcp=screwdriver.tcp('tip'),
+                  max_solutions=1, ref_qs=mid_qs)
+    q_start = _s[0] if _s else None
+    if q_start is None:
+        print('Cannot find a reachable ORSD start pose.')
+        base.run()
+        raise SystemExit
+
+    robot.fk(qs=q_start)
+    orsd_tcp = screwdriver.tcp('tip')
+    start_rotmat = orsd_tcp.tf[:3, :3].copy()
+    start_pos = orsd_tcp.tf[:3, 3].copy()
+    goal_pos = start_pos + np.array([0.5, 0.5, 0.2], dtype=np.float32)
+    goal_rotmat = start_rotmat.copy()
+
+    wssop.frame(pos=start_pos, rotmat=start_rotmat, color_mat=wuc.CoordColor.DYO).add_to_scene(scene)
+    wssop.frame(pos=goal_pos, rotmat=goal_rotmat, color_mat=wuc.CoordColor.MYC).add_to_scene(scene)
+
+    q_seq, pose_seq = wmic.linear_to_jpath(
+        robot=robot,
+        start_rotmat=start_rotmat,
+        start_pos=start_pos,
+        goal_rotmat=goal_rotmat,
+        goal_pos=goal_pos,
+        pos_step=0.01,
+        rot_step=np.deg2rad(2.0),
+        ref_qs=q_start,
+        tcp=orsd_tcp,
+    )
+    if q_seq is None:
+        print('linear_to_jpath failed (IK failed on at least one sample).')
+        pos_seq, rotmat_seq = pose_seq
+        for pos, rotmat in zip(pos_seq, rotmat_seq):
+            wssop.frame(
+                pos=pos,
+                rotmat=rotmat,
+                color_mat=wuc.CoordColor.DYO,
+                alpha=0.2,
+            ).add_to_scene(scene)
+        base.run()
+    else:
+        print(f'linear_to_jpath success: {len(q_seq)} waypoints')
+        # time-parameterize joint waypoints
+        n_jnts = q_seq.shape[1]
+        v_max = np.full(n_jnts, 1.2, dtype=np.float32)
+        a_max = np.full(n_jnts, 2.5, dtype=np.float32)
+        t_seq, q_tp, qd_tp, qdd_tp = wmttp.retime_trapezoidal(
+            q_seq=q_seq,
+            v_max=v_max,
+            a_max=a_max,
+            dt=0.01,
+        )
+        print(f'time-parameterized samples: {len(t_seq)}, duration: {float(t_seq[-1]):.3f}s')
+
+        # optional plot
+        try:
+            import matplotlib.pyplot as plt
+
+            fig, axes = plt.subplots(3, 1, sharex=True, figsize=(8, 6))
+            for j in range(n_jnts):
+                axes[0].plot(t_seq, q_tp[:, j], label=f'q{j + 1}')
+                axes[1].plot(t_seq, qd_tp[:, j])
+                axes[2].plot(t_seq, qdd_tp[:, j])
+            axes[0].set_ylabel('q (rad)')
+            axes[1].set_ylabel('qd (rad/s)')
+            axes[2].set_ylabel('qdd (rad/s^2)')
+            axes[2].set_xlabel('t (s)')
+            axes[0].legend(loc='upper right', ncol=3, fontsize=8)
+            fig.tight_layout()
+            plt.show()
+        except Exception as e:
+            print(f'matplotlib plot skipped: {e}')
+
+        pos_seq, rotmat_seq = pose_seq
+        for pos, rotmat in zip(pos_seq, rotmat_seq):
+            wssop.frame(
+                pos=pos,
+                rotmat=rotmat,
+                color_mat=wuc.CoordColor.DYO,
+                alpha=0.12,
+            ).add_to_scene(scene)
+
+        duration = float(t_seq[-1]) if len(t_seq) > 0 else 0.0
+        t_acc = [0.0]
+
+        def tick(dt):
+            if duration <= 0.0:
+                return
+            t_acc[0] = (t_acc[0] + dt) % duration
+            k = int(np.searchsorted(t_seq, t_acc[0], side='right') - 1)
+            k = max(0, min(k, len(q_tp) - 1))
+            robot.fk(qs=q_tp[k])
+
+        base.schedule_interval(tick, interval=0.005)
+        base.run()

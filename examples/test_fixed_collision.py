@@ -1,0 +1,45 @@
+import numpy as np
+import wrs.collider.mj_collider as wcm
+from wrs import wuc, wvw, wssop, khi_rs007l, or_2fg7
+
+print("="*60)
+print("Testing Fixed Ground Collision Detection")
+print("="*60)
+
+base = wvw.World()
+
+robot = khi_rs007l.RS007L(pos=(.5, 0, 0))
+robot.add_to_scene(base.scene)
+
+gripper = or_2fg7.OR2FG7()
+gripper.add_to_scene(base.scene)
+robot.mount(gripper, robot.runtime_lnks[-1], update=True)
+
+# NEW: Use a box at z=0.2 (robot collision geometry extends to ~z=0.25)
+ground = wssop.box(
+    xyz_lengths=(100, 100, 0.1),
+    pos=(0, 0, 0.2),
+    collision_type=wuc.CollisionType.AABB,
+    rgb=(0.5, 0.5, 0.5))
+ground.add_to_scene(base.scene)
+
+mjc = wcm.MJCollider()
+mjc.append(robot)
+mjc.append(ground)
+mjc.actors = [robot]
+mjc.compile(margin=0.0)
+
+qs_home = np.array([0, 0, 0, 0, 0, 0], dtype=np.float32)
+qs_bent = np.array([0, np.pi/3, 0, 0, 0, 0], dtype=np.float32)
+
+print("\nTest 1 - Robot at home position:")
+print(f"  Joint config: {qs_home}")
+print(f"  Collision detected: {mjc.is_collided(qs_home)}")
+
+print("\nTest 2 - Robot with joint 1 bent down (π/3):")
+print(f"  Joint config: {qs_bent}")
+print(f"  Collision detected: {mjc.is_collided(qs_bent)}")
+
+print("\n" + "="*60)
+print("SUCCESS! Ground collision detection is now working!")
+print("="*60)

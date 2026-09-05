@@ -1,0 +1,105 @@
+site_name: wrs
+site_description: >-
+  A self-contained robotics library -- kinematics, scene, mesh geometry,
+  collision, grasp planning, motion, viewer.
+site_url: https://wrslab.github.io/wrs/
+repo_url: https://github.com/wrslab/wrs
+repo_name: wrslab/wrs
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    # navigation.instant is intentionally omitted: it is incompatible with the
+    # mkdocs-static-i18n language switcher contextual links.
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list           # explicit {#id} on headings -> stable cross-lang anchors
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  # embed runnable examples verbatim via `--8<-- "examples/<name>.py"`,
+  # so the docs stay in sync with the live code (base_path = repo root).
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+plugins:
+  # listing plugins disables the implicit default search plugin, so re-add it.
+  - search
+  # Japanese / Chinese translations live beside each English page as
+  # ``<name>.ja.md`` / ``<name>.zh.md`` (suffix structure). The auto-generated
+  # API reference (api/*.md, API_INDEX.md) is intentionally English-only -- it
+  # regenerates from English docstrings, so ``fallback_to_default`` serves the
+  # English page under every locale. Adds the Material language switcher.
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: ja
+          name: 日本語
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: installation.md
+      - Quick Start: quickstart.md
+  - Development:
+      - Comment Style: COMMENT_STYLE.md
+  - Tutorials:
+      - Kinematics: tutorials/kinematics.md
+      - Scene & Geometry: tutorials/scene_geometry.md
+      - Collision: tutorials/collision.md
+      - Grasp Planning: tutorials/grasp_planning.md
+      - Motion Planning: tutorials/motion_planning.md
+      - End-Effectors & Tool Change: tutorials/end_effectors.md
+      - Humanoid (L1): tutorials/humanoid.md
+      - MuJoCo: tutorials/mujoco.md
+  - API:
+      - Overview: api/index.md
+      - wrs.utils: api/utils.md
+      - wrs.scene: api/scene.md
+      - wrs.geom: api/geom.md
+      - wrs.collider: api/collider.md
+      - wrs.grasp: api/grasp.md
+      - wrs.manipulation: api/manipulation.md
+      - wrs.motion: api/motion.md
+      - wrs.physics: api/physics.md
+      - wrs.robots: api/robots.md
+      - wrs.viewer: api/viewer.md
+      - wrs.stream: api/stream.md
+      - wrs.devices: api/devices.md
+      - Full Index: API_INDEX.md

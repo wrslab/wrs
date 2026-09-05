@@ -1,0 +1,561 @@
+import os
+import numpy as np
+import wrs.utils.math as wum
+import wrs.robots.base.mech_structure as wrbms
+import wrs.robots.base.tcp as wrbt
+import wrs.robots.base.kine.numik_sel as wrbkis
+
+
+class Mounting:
+    """``child`` welded to ``plnk`` at ``loc_tf``. The mount OWNS the child's
+    pose: nothing else may drive it while the mounting stands.
+
+    ``child_was_floating`` snapshots the child's physics flag, which the weld
+    forces to False (a welded body has no free joint) and ``unmount`` restores.
+    That flag is physics ONLY -- whether a body is free to be mounted is
+    ``child.mounted_by is None``, a separate question."""
+
+    def __init__(self, child, parent_link, loc_tf):
+        self.child = child
+        self.plnk = parent_link
+        self.loc_tf = loc_tf
+        self.child_was_floating = child.is_floating
+
+
+class MechBase:
+    _structure: wrbms.MechStruct = None
+
+    @classmethod
+    def _build_structure(cls, *args, **kwargs):
+        raise NotImplementedError
+
+    @property
+    def structure(self):
+        cls = type(self)
+        if cls._structure is None:
+            cls._structure = cls._build_structure()
+        return cls._structure
+
+    def __init__(self, rotmat=None, pos=None,
+                 home_qs=None, is_floating=True):
+        self._compiled = self.structure._compiled
+        self._rotmat = wum.ensure_rotmat(rotmat)
+        self._pos = wum.ensure_pos(pos)
+        if home_qs is None:
+            self.qs = np.zeros(
+                self._compiled.n_jnts, dtype=np.float32)
+        else:
+            self.qs = np.asarray(home_qs, dtype=np.float32)
+        # runtime geom
+        self.runtime_lnks = [
+            lnk.clone() for lnk in self.structure.lnks]
+        self.runtime_lidx_map = {
+            lnk: i for i, lnk in enumerate(self.runtime_lnks)}
+        # FK cache
+        self.gl_lnk_tfarr = np.tile(
+            np.eye(4, dtype=np.float32),
+            (self._compiled.n_lnks, 1, 1))
+        # mountings
+        self._mountings = {}
+        self._mounted_by = None     # set while another mech's mount owns our pose
+        # the render scene this mech is attached to (one at a time; None when
+        # detached). Mounted children inherit it -> scene membership follows the
+        # mount tree (see add_to_scene / mount).
+        self._scene = None
+        # named chains (which joints move) + tcps (what point to position)
+        self._chains = {}
+        self._tcps = {}
+        # solvers
+        self._solvers = {}
+        # home
+        self._home_qs = self.qs.copy()
+        # free root lnk
+        ridx = self.structure.compiled.root_lnk_idx
+        self.runtime_lnks[ridx]._is_floating = is_floating
+        self.fk()
+
+    def add_to_scene(self, scene):
+        """Add to ``scene`` (and recurse into mounted children, so the whole
+        assembly renders). One scene at a time: re-adding to the same scene is a
+        no-op; adding to a different one MOVES this mech (leaves the old)."""
+        if self._scene is scene:
+            return
+        if self._scene is not None:
+            self.remove_from_scene(self._scene)
+        scene.add(self)
+        self._scene = scene
+        for m in self._mountings.values():
+            m.child.add_to_scene(scene)
+
+    def remove_from_scene(self, scene):
+        for m in self._mountings.values():
+            m.child.remove_from_scene(scene)
+        scene.remove(self)
+        self._scene = None
+
+    def set_pos_rotmat(self, pos=None, rotmat=None):
+        self._pos[:] = wum.ensure_pos(pos)
+        self._rotmat[:] = wum.ensure_rotmat(rotmat)
+        self.fk()
+
+    def fk(self, qs=None):
+        compiled = self._compiled
+        if qs is not None:
+            n_qs = len(qs)
+            if n_qs == len(self.qs):
+                self.qs[:] = qs
+            elif n_qs == compiled.n_active_jnts:
+                self.qs[compiled.active_jnt_ids_mask] = qs
+            else:
+                raise ValueError(
+                    f'Expected {len(self.qs)} full qs or '
+                    f'{compiled.n_active_jnts} active qs, got {n_qs}'
+                )
+        q_resolved = compiled.resolve_all_qs(self.qs)
+        rlidx = compiled.root_lnk_idx
+        self.gl_lnk_tfarr[rlidx][:3, :3] = self._rotmat
+        self.gl_lnk_tfarr[rlidx][:3, 3] = self._pos
+        # traversal
+        for lidx in compiled.lnk_ids_traversal_order:
+            if lidx == rlidx:
+                continue
+            plidx = compiled.plidx_of_lidx[lidx]
+            pjidx = compiled.pjidx_of_lidx[lidx]
+            jnt = self.structure.jnts[pjidx]
+            plnk_tfmat = self.gl_lnk_tfarr[plidx]
+            jtfq = (compiled.jtf0_by_idx[pjidx] @
+                    jnt.motion_tf(q_resolved[pjidx]))
+            self.gl_lnk_tfarr[lidx] = plnk_tfmat @ jtfq
+        self._update_runtime()
+        return self.gl_lnk_tfarr
+
+    def mount(self, child, plnk, loc_tf=None, update=False):
+        """Weld free ``child`` to link ``plnk`` of this mech. Scene membership
+        follows the mount automatically: the child inherits this mech's render
+        scene (mount before OR after attaching -- either order works), so callers
+        never separately attach a mounted child. ``unmount`` removes it again."""
+        if child is self:
+            raise ValueError("Self-mounting not allowed")
+        if child.mounted_by is not None:
+            # a pose has exactly one owner; is_floating is NOT this question --
+            # a static body (a box on a table) is perfectly mountable.
+            raise ValueError("Child is already mounted")
+        if loc_tf is None:
+            loc_tf = np.eye(4, dtype=np.float32)
+        else:
+            loc_tf = np.asarray(loc_tf, dtype=np.float32)
+        self._mountings[child] = Mounting(child, plnk, loc_tf)
+        child._mounted_by = self
+        child.is_floating = False   # welded: no free joint. Collision role is
+                                    # unchanged, and unmount restores the flag.
+        if self._scene is not None:
+            # a welded child lives in exactly the parent's scene; add_to_scene is
+            # idempotent if it is already there, and moves it if it was elsewhere.
+            child.add_to_scene(self._scene)
+        if update:
+            self._update_mounting(self._mountings[child])
+
+    def unmount(self, child):
+        try:
+            m = self._mountings.pop(child)
+        except KeyError:
+            raise ValueError("Child not mounted")
+        child._mounted_by = None
+        child.is_floating = m.child_was_floating
+        if self._scene is not None:
+            child.remove_from_scene(self._scene)   # leaves with the parent's scene
+        return m
+
+    def get_solver(self, chain):
+        """Return the IK solver for ``chain``, lazily building the default
+        numerical (SELIK) solver on first use. A custom solver paired with the
+        chain via ``add_chain(..., solver=...)`` is already in ``_solvers`` and
+        returned directly."""
+        if chain not in self._solvers:
+            if (chain.base_lidx == self.structure.compiled.root_lnk_idx and
+                    chain.tip_lidx in self.structure.compiled.tip_lnk_ids):
+                _data_dir = os.path.join(self.structure.res_dir, "data")
+            else:
+                # use the registered chain name as a readable hint, falling
+                # back to link indices for unnamed (ad-hoc) chains.
+                label = getattr(chain, "name", None) or \
+                    f"{chain.base_lidx}_{chain.tip_lidx}"
+                _data_dir = os.path.join(
+                    self.structure.res_dir, "data", f"chain_{label}")
+            self._solvers[chain] = wrbkis.SELIKSolver(chain, _data_dir)
+        return self._solvers[chain]
+
+    # ---- chain registry ------------------------------------------------
+    def add_chain(self, name, base_lnk, tip_lnk, solver=None):
+        """Register a named chain (which joints move). base/tip are STRUCTURE
+        links. The chain object is structure-level + shared (cached by
+        get_chain), so it is clone-safe with no remapping.
+
+        ``solver``: optional callable ``chain -> solver`` (e.g. an analytic
+        solver class) that builds this chain's IK solver, paired with the chain
+        right here and built eagerly. Chains without one fall back to the
+        numerical SELIK solver, built lazily on first ik.
+        """
+        if name in self._chains:
+            raise ValueError(f"Chain already defined: {name}")
+        c = self.structure.get_chain(base_lnk, tip_lnk)
+        c.name = name   # readable hint for solver data dirs / debugging
+        self._chains[name] = c
+        if solver is not None:
+            self._solvers[c] = solver(c)
+        return c
+
+    def chain(self, name):
+        return self._chains[name]
+
+    @property
+    def chains(self):
+        return dict(self._chains)
+
+    def chain_joint_limits(self, chain, ref_qs=None):
+        """``(lo, hi)`` joint limits over the FULL qs that free only ``chain``
+        and PIN every other joint to ``ref_qs`` (default the current ``qs``).
+
+        Pass to a ``PlanningContext`` so motion planning explores only that
+        chain: a no-op when the chain spans all the robot's joints (an arm),
+        essential for a humanoid (keeps the torso / other limbs still while one
+        arm reaches). ``chain`` is a name or a ``KinematicChain``."""
+        c = self._compiled
+        ch = self.chain(chain) if isinstance(chain, str) else chain
+        ref = (self.qs if ref_qs is None else np.asarray(ref_qs)).astype(
+            np.float64)
+        lo = c.jlmt_low_by_idx.astype(np.float64).copy()
+        hi = c.jlmt_high_by_idx.astype(np.float64).copy()
+        free = np.zeros(c.n_jnts, dtype=bool)
+        free[ch.active_jnt_ids] = True
+        lo[~free] = ref[~free]
+        hi[~free] = ref[~free]
+        return lo, hi
+
+    # ---- tcp registry --------------------------------------------------
+    def add_tcp(self, name, parent_lnk, loc_tf=None):
+        """Define a named tcp (link + local offset) used as an ik target.
+
+        parent_lnk must be a runtime link of this mechanism. A single link
+        may host any number of tcps.
+        """
+        if name in self._tcps:
+            raise ValueError(f"TCP already defined: {name}")
+        if parent_lnk not in self.runtime_lidx_map:
+            raise ValueError("parent_lnk must be a runtime link of this mechanism")
+        tcp = wrbt.TCP(parent_lnk, loc_tf, name)
+        self._tcps[name] = tcp
+        return tcp
+
+    def tcp(self, name):
+        return self._tcps[name]
+
+    @property
+    def tcps(self):
+        return dict(self._tcps)
+
+    def toggle_tcp(self, name, color_mat=None, **kwargs):
+        """Toggle a coordinate frame for the named tcp: first call mounts it on
+        the tcp's parent link (so it follows the robot), second call unmounts
+        it. Returns the frame sobj when shown, else None."""
+        import wrs.utils.constant as wuc
+        import wrs.scene.scene_object_primitive as wssop
+        tcp = self.tcp(name)
+        objs = getattr(self, '_tcp_frame_objs', None)
+        if objs is None:
+            objs = {}
+            self._tcp_frame_objs = objs
+        if name in objs:
+            self.unmount(objs.pop(name))
+            return None
+        if color_mat is None:
+            color_mat = wuc.CoordColor.MYC
+        f = wssop.frame(color_mat=color_mat, **kwargs)
+        # mounted at the tcp's offset on the tcp's link, so it follows the robot.
+        # It carries no collider, so the weld costs nothing beyond the transform.
+        self.mount(f, tcp.parent_lnk, tcp.loc_tf, update=True)
+        objs[name] = f
+        return f
+
+    # ---- ik verb -------------------------------------------------------
+    def _resolve_ik_target(self, chain, tcp):
+        """Resolve str names, validate control, and return
+        (chain, tcp, base_tf, t_tip2tcp) shared by ik / ik_partial.
+
+        chain  : name (str, resolved against this mechanism's chain registry)
+                 or a KinematicChain object.
+        tcp    : name (str, this mechanism's tcp registry) or a TCP object
+                 (object form for a foreign/child registry, e.g. an engaged
+                 gripper's tcp, or a transient target).
+        The chain-tip -> tcp offset is read from current FK (a rigid constant
+        for this solve), so tcp need not sit on chain.tip.
+        """
+        if isinstance(chain, str):
+            chain = self.chain(chain)
+        if isinstance(tcp, str):
+            tcp = self.tcp(tcp)
+        if not self._chain_controls_tcp(chain, tcp):
+            raise ValueError(
+                "This chain does not control the tcp: tcp.parent_lnk is "
+                "neither downstream of the chain tip in this mechanism, nor "
+                "on a child mounted downstream of the chain tip.")
+        base_tf = self.runtime_lnks[chain.base_lidx].tf
+        tip_tf = self.runtime_lnks[chain.tip_lidx].tf
+        t_tip2tcp = np.linalg.inv(tip_tf) @ tcp.tf
+        return chain, tcp, base_tf, t_tip2tcp
+
+    def ik(self, tgt_pos, tgt_rotmat, chain='main', tcp='flange',
+           max_solutions=8, ref_qs=None, **kwargs):
+        """Full-pose IK: solve so ``tcp`` reaches the 6-DOF target pose, using
+        ``chain``. Returns a list of full qs vectors (empty if unreachable).
+
+        Target is (tgt_pos, tgt_rotmat) -- pos first (ROS Pose order). chain/tcp
+        default to the single-arm convention 'main'/'flange', so a plain arm is
+        just ``arm.ik(pos, rotmat)``; pass chain=/tcp= for other chains or a
+        foreign tcp object (e.g. ``arm.ik(pos, R, tcp=gripper.tcp('grasp_center'))``).
+        For under-constrained targets use ``ik_partial``."""
+        chain, tcp, base_tf, t_tip2tcp = self._resolve_ik_target(chain, tcp)
+        tgt_tcp_tf = wum.tf_from_pos_rotmat(tgt_pos, tgt_rotmat)
+        tgt_tip_tf = tgt_tcp_tf @ np.linalg.inv(t_tip2tcp)
+        solver = self.get_solver(chain)
+        results = solver.ik(
+            root_rotmat=base_tf[:3, :3],
+            root_pos=base_tf[:3, 3],
+            tgt_rotmat=tgt_tip_tf[:3, :3],
+            tgt_pos=tgt_tip_tf[:3, 3],
+            max_solutions=max_solutions,
+            ref_qs=ref_qs,
+            **kwargs,
+        )
+        return [chain.embed_active_qs(q, self.qs) for q in results]
+
+    def ik_partial(self, tgt_pos=None, axis_constraints=None,
+                   chain='main', tcp='flange',
+                   max_solutions=1, ref_qs=None, seed_count=8,
+                   pos_weight=1.0, axis_weight=0.2,
+                   pos_tol=1e-4, axis_tol=1e-3, max_iter=200,
+                   return_infos=False, **kwargs):
+        """Partial IK: under-constrained target -- a position and/or
+        axis-direction constraints, orientation otherwise free (e.g. point a
+        camera's z axis at a target, roll free). Always numerical; the chain's
+        solver must support ik_partial (the analytic main-chain solver does
+        not).
+
+        Target is (tgt_pos, axis_constraints) -- pos first; chain/tcp default
+        to 'main'/'flange'. Returns a list of full qs vectors (empty if
+        unreachable); with ``return_infos=True`` returns ``(qs_list, infos)``.
+        """
+        if tgt_pos is None and axis_constraints is None:
+            raise ValueError('tgt_pos or axis_constraints must be provided')
+        chain, tcp, base_tf, t_tip2tcp = self._resolve_ik_target(chain, tcp)
+        solver = self.get_solver(chain)
+        if not hasattr(solver, 'ik_partial'):
+            raise TypeError(
+                f"Solver {type(solver).__name__} does not support partial IK; "
+                "use a numerical chain (not the analytic main chain).")
+        ac = wum.parse_axis_constraints(axis_constraints)
+        tgt_pos = None if tgt_pos is None else np.asarray(tgt_pos, dtype=np.float32)
+        if ref_qs is None:
+            ref_qs = chain.extract_active_qs(self.qs)
+        tgt_rotmat_hint = wum.rotmat_from_axis_constraints(ac, ref_rotmat=tcp.rotmat)
+        results, infos = solver.ik_partial(
+            root_rotmat=base_tf[:3, :3],
+            root_pos=base_tf[:3, 3],
+            tgt_pos=tgt_pos,
+            axis_constraints=ac,
+            loc_tf=t_tip2tcp,
+            tgt_rotmat_hint=tgt_rotmat_hint,
+            max_solutions=max_solutions,
+            ref_qs=ref_qs,
+            max_iter=max_iter,
+            seed_count=seed_count,
+            return_infos=True,
+            pos_weight=pos_weight,
+            axis_weight=axis_weight,
+            tol_pos=pos_tol,
+            tol_axis=axis_tol,
+            **kwargs,
+        )
+        qs_list = [chain.embed_active_qs(q, self.qs) for q in results]
+        return (qs_list, infos) if return_infos else qs_list
+
+    def _chain_controls_tcp(self, chain, tcp):
+        """True if moving ``chain`` actually moves ``tcp``.
+
+        Two cases:
+        - tcp on one of this mechanism's runtime links: the link must be
+          chain.tip or a descendant of it.
+        - tcp on a link of a child mounted on this mechanism (e.g. a gripper
+          engaged on the flange): the mount's parent link must be chain.tip
+          or a descendant of it (the child rides rigidly on it).
+        """
+        lnk = tcp.parent_lnk
+        if lnk in self.runtime_lidx_map:
+            return self._lidx_downstream_of_tip(self.runtime_lidx_map[lnk],
+                                                chain.tip_lidx)
+        for m in self._mountings.values():
+            child = m.child
+            child_map = getattr(child, 'runtime_lidx_map', None)
+            if child_map is not None and lnk in child_map:
+                return self._lidx_downstream_of_tip(
+                    self.runtime_lidx_map[m.plnk], chain.tip_lidx)
+        return False
+
+    def _lidx_downstream_of_tip(self, lidx, tip_lidx):
+        """True if link lidx == tip_lidx or is a descendant of it."""
+        compiled = self._compiled
+        cur = lidx
+        while cur >= 0:
+            if cur == tip_lidx:
+                return True
+            cur = compiled.plidx_of_lidx[cur]
+        return False
+
+    def clone(self):
+        """DOES NOT clone the affiliated scene"""
+        new = self.__class__.__new__(self.__class__)
+        new._compiled = self._compiled
+        new._rotmat = self._rotmat.copy()
+        new._pos = self._pos.copy()
+        new.qs = self.qs.copy()
+        new.runtime_lnks = [lnk.clone() for lnk in self.runtime_lnks]
+        new.runtime_lidx_map = {
+            lnk: i for i, lnk in enumerate(new.runtime_lnks)}
+        new.gl_lnk_tfarr = self.gl_lnk_tfarr.copy()
+        new._scene = None           # a fresh clone is not attached to any scene
+        new._mountings = {}
+        new._mounted_by = None      # a fresh clone is not mounted anywhere
+        new._solvers = self._solvers  # solvers can be shared
+        for k, m in self._mountings.items():
+            child = m.child.clone()
+            plidx = self.runtime_lidx_map[m.plnk]
+            plink = new.runtime_lnks[plidx]
+            new._mountings[child] = Mounting(
+                child, plink, m.loc_tf.copy())
+        # chains are structure-level + shared -> copy refs, no remap
+        new._chains = dict(self._chains)
+        new._tcps = {}
+        for name, tcp in self._tcps.items():
+            plidx = self.runtime_lidx_map[tcp.parent_lnk]
+            new._tcps[name] = tcp.copy(parent_lnk=new.runtime_lnks[plidx])
+        new._home_qs = self._home_qs.copy()
+        return new
+
+    @property
+    def ndof(self):
+        return self._compiled.n_active_jnts
+
+    @property
+    def runtime_root_lnk(self):
+        ridx = self.structure.compiled.root_lnk_idx
+        return self.runtime_lnks[ridx]
+
+    @property
+    def mounted_by(self):
+        """The mech whose ``mount`` owns this one's pose, or None if free to be
+        mounted. Orthogonal to ``is_floating``, which is physics only."""
+        return self._mounted_by
+
+    @property
+    def is_floating(self):
+        return self.runtime_root_lnk.is_floating
+
+    @is_floating.setter
+    def is_floating(self, flag):
+        self.runtime_root_lnk.is_floating = flag
+
+    @property
+    def home_qs(self):
+        return self._home_qs.copy()
+
+    @home_qs.setter
+    def home_qs(self, value):
+        self._home_qs[:] = np.asarray(value, dtype=np.float32)
+
+    @property
+    def tf(self):
+        return wum.tf_from_pos_rotmat(self._pos, self._rotmat)
+
+    @property
+    def rotmat(self):
+        return self._rotmat.copy()
+
+    @rotmat.setter
+    def rotmat(self, value):  # TODO: delay update
+        self._rotmat[:] = wum.ensure_rotmat(value)
+        self.fk()
+
+    @property
+    def quat(self):
+        return wum.quat_from_rotmat(self._rotmat)
+
+    @property
+    def pos(self):
+        return self._pos.copy()
+
+    @pos.setter
+    def pos(self, value):  # TODO: delay update
+        self._pos[:] = wum.ensure_pos(value)
+        self.fk()
+
+    @property
+    def toggle_render_collision(self):
+        return self.runtime_lnks[0].toggle_render_collision
+
+    @toggle_render_collision.setter
+    def toggle_render_collision(self, flag=True):
+        for lnk in self.runtime_lnks:
+            lnk.toggle_render_collision = flag
+
+    @property
+    def rgba(self):
+        return [lnk.rgba for lnk in self.runtime_lnks]
+
+    @rgba.setter
+    def rgba(self, value):  # only allow uniform color change
+        for lnk in self.runtime_lnks:
+            lnk.rgba = value
+        for m in self._mountings.values():
+            m.child.rgba = value
+
+    @property
+    def rgb(self):
+        return [lnk.rgb for lnk in self.runtime_lnks]
+
+    @rgb.setter
+    def rgb(self, value):  # only allow uniform color change
+        for lnk in self.runtime_lnks:
+            lnk.rgb = value
+        for m in self._mountings.values():
+            m.child.rgb = value
+
+    @property
+    def alpha(self):
+        return [lnk.alpha for lnk in self.runtime_lnks]
+
+    @alpha.setter
+    def alpha(self, value):  # only allow uniform color change
+        for lnk in self.runtime_lnks:
+            lnk.alpha = value
+        for m in self._mountings.values():
+            m.child.alpha = value
+
+    # internal helpers
+    def _update_runtime(self):
+        # push FK result to runtime links -- gl_lnk_tfarr holds world poses and
+        # a link's tf IS its world pose, so this is a straight copy.
+        for i, lnk in enumerate(self.runtime_lnks):
+            lnk.tf = self.gl_lnk_tfarr[i]
+        # update mountings
+        for m in self._mountings.values():
+            self._update_mounting(m)
+
+    def _update_mounting(self, mounting):
+        child_tf = mounting.plnk.tf @ mounting.loc_tf
+        if isinstance(mounting.child, MechBase):
+            mounting.child._rotmat[:] = child_tf[:3, :3]
+            mounting.child._pos[:] = child_tf[:3, 3]
+            mounting.child.fk()
+        else:
+            # the mount owns the child's pose outright -- write it straight in.
+            mounting.child.tf = child_tf

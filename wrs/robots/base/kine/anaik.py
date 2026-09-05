@@ -1,0 +1,353 @@
+import numpy as np
+
+import wrs.utils.math as wum
+import wrs.robots.base.kine.ikgeo.sp1_lib as wrbkisp1
+import wrs.robots.base.kine.ikgeo.sp2_lib as wrbkisp2
+import wrs.robots.base.kine.ikgeo.sp3_lib as wrbkisp3
+import wrs.robots.base.kine.ikgeo.sp4_lib as wrbkisp4
+
+
+class AnaIKBase:
+    """
+    Analytic IK base class (returns all solutions).
+    ik(...) returns solutions in root frame.
+    """
+
+    # sp1's default is_LS tolerance is a tight 1e-5, but the analytic
+    # decomposition of a real (float32) chain carries a ~7e-4 rad closure
+    # residual, so a geometrically-VALID roll branch gets wrongly flagged is_LS
+    # and dropped (false "no solution"). ik_all therefore passes this looser
+    # tol to sp1_run for the orientation (roll) subproblems -- above the float32
+    # noise floor, below any genuinely-bad branch. Position subproblems
+    # (sp2/sp3/sp4) keep their tight is_LS, so an unreachable target still
+    # yields no solution. (Tighten this only with a float64 analytic-IK path.)
+    sp1_tol = 1e-3
+
+    def __init__(self, chain, joint_limits=None):
+        self.chain = chain
+        if joint_limits is None:
+            self.joint_limits = (chain.lmt_lo, chain.lmt_up)
+        else:
+            self.joint_limits = joint_limits
+
+    def ik(
+        self,
+        root_rotmat,
+        root_pos,
+        tgt_rotmat,
+        tgt_pos,
+        max_solutions=8,
+        ref_qs=None,
+        **kwargs,
+    ):
+        root_tf = wum.tf_from_pos_rotmat(root_pos, root_rotmat)
+        tgt_tf = wum.tf_from_pos_rotmat(tgt_pos, tgt_rotmat)
+        tgt_tf_in_root = np.linalg.inv(root_tf) @ tgt_tf
+        sols = self.ik_all(tgt_tf_in_root, **kwargs)
+        if not sols:
+            return []
+        if ref_qs is not None:
+            ref_qs = np.asarray(ref_qs, dtype=np.float32)
+            # Rank by 2pi-wrapped (physical) joint distance so the "nearest"
+            # pick is the physically-closest branch, not whichever happens to
+            # be closest after each joint is snapped to [-pi, pi]. Then unwrap
+            # the returned values toward ref so the joint trajectory stays
+            # continuous (no spurious ~2pi jumps) where joint limits allow.
+            order = np.argsort([self._wrapped_dist(q, ref_qs) for q in sols])
+            sols = [self._unwrap_to_ref(sols[i], ref_qs) for i in order]
+        if max_solutions is not None:
+            sols = sols[:max_solutions]
+        return sols
+
+    @staticmethod
+    def _wrapped_dist(q, ref_qs):
+        """Physical joint distance with each diff wrapped into [-pi, pi]."""
+        d = (q - ref_qs + np.pi) % (2.0 * np.pi) - np.pi
+        return float(np.linalg.norm(d))
+
+    def _unwrap_to_ref(self, q, ref_qs):
+        """Shift each joint of solution ``q`` by the multiple of 2*pi that
+        brings it closest to ``ref_qs`` (continuity), without crossing joint
+        limits. Prismatic joints (small values) are unaffected since
+        round(delta / 2pi) == 0 for them."""
+        qu = q + np.round((ref_qs - q) / (2.0 * np.pi)) * (2.0 * np.pi)
+        if self.joint_limits is not None:
+            lo, hi = self.joint_limits
+            out_of_range = (qu < lo) | (qu > hi)
+            qu = np.where(out_of_range, q, qu)
+        return qu.astype(np.float32)
+
+    def ik_all(self, tgt_tf_in_root, **kwargs):
+        raise NotImplementedError
+
+    def get_rotmat_from_fk(self, qs, k):
+        tf = np.eye(4, dtype=np.float32)
+        for i in range(k):
+            tf = tf @ self.chain.jnts[i].zero_tf @ self.chain.jnts[i].motion_tf(qs[i])
+        return tf[:3, :3]
+
+    def _filter_limits(self, qs_list):
+        if self.joint_limits is None:
+            return qs_list
+        low, high = self.joint_limits
+        out = []
+        for q in qs_list:
+            if np.all(q >= low) and np.all(q <= high):
+                out.append(q)
+        return out
+
+    def _unique(self, qs_list, tol=1e-4):
+        uniq = []
+        for q in qs_list:
+            if all(np.linalg.norm(q - u) > tol for u in uniq):
+                uniq.append(q)
+        return uniq
+
+
+class S456X12(AnaIKBase):
+    # Max allowed miss (m) for the wrist (axes 4,5,6 concurrent) and the
+    # shoulder (axes 1,2 intersecting). Above this the analytic decomposition
+    # only approximates the chain, so construction is rejected.
+    intersect_tol = 1e-6
+
+    def __init__(self, chain, joint_limits=None, intersect_tol=None):
+        super().__init__(chain, joint_limits=joint_limits)
+        tol = self.intersect_tol if intersect_tol is None else intersect_tol
+        o = [np.asarray(self.chain.origins[i], dtype=np.float32)
+             for i in range(6)]
+        a = [wum.unit_vec(self.chain.axes[i], return_length=False)
+             for i in range(6)]
+        # Relocate the joint origins onto the wrist center (intersection of axes
+        # 4,5,6) and shoulder center (intersection of axes 1,2). The sp3/sp2
+        # position decomposition below assumes joints 1,2 share an origin
+        # (p12 == 0): |p16| is measured from o1 but the sp3 magnitude is from o2,
+        # so any o1->o2 offset ALONG the axes leaks straight into the position
+        # error -- hence we solve for the true intersection rather than trusting
+        # the URDF origins. Reject chains that are not actually S456 (spherical
+        # wrist) + X12 (axes 1,2 meeting): there the "intersection" is a poor fit
+        # and the solution would be silently degraded.
+        ow, wrist_gap = wum.intersect_lines(
+            [(o[3], a[3]), (o[4], a[4]), (o[5], a[5])])
+        if ow is None or wrist_gap > tol:
+            raise ValueError(
+                f"S456X12: axes 4,5,6 are not concurrent (not a spherical "
+                f"wrist); gap = {wrist_gap * 1e3:.3f} mm > {tol * 1e3:.3f} mm")
+        shoulder = wum.closest_point_between_lines(o[0], a[0], o[1], a[1])
+        if shoulder is None or shoulder[1] > tol:
+            gap = float('inf') if shoulder is None else shoulder[1]
+            raise ValueError(
+                f"S456X12: axes 1 and 2 do not intersect (not X12); "
+                f"gap = {gap * 1e3:.3f} mm > {tol * 1e3:.3f} mm")
+        osh = shoulder[0].astype(np.float32)
+        # paper-style vectors
+        self.p01 = osh.astype(np.float32)
+        self.p12 = np.zeros(3, dtype=np.float32)
+        self.p23 = (o[2] - osh).astype(np.float32)
+        self.p34 = (ow - o[2]).astype(np.float32)
+        self.p45 = np.zeros(3, dtype=np.float32)
+        self.p56 = np.zeros(3, dtype=np.float32)
+        self.p6t = (o[5] - ow).astype(np.float32)
+        self.h1 = self.chain.axes[0]
+        self.h2 = self.chain.axes[1]
+        self.h3 = self.chain.axes[2]
+        self.h4 = self.chain.axes[3]
+        self.h5 = self.chain.axes[4]
+        self.h6 = self.chain.axes[5]
+
+    def ik_all(self, tgt_tf_in_root, **kwargs):
+        # compute q3 by sp3
+        # || R23p34 + p23 || = || p16 ||
+        # p16 = p0t - R06 p6t - p01
+        p06 = tgt_tf_in_root[:3, 3]
+        R06 = tgt_tf_in_root[:3, :3] @ self.chain.tfs[-1][:3, :3].T
+        p16 = p06 - R06 @ self.p6t - self.p01
+        p1 = self.p34
+        p2 = -self.p23
+        k = self.h3
+        d = float(np.linalg.norm(p16))
+        q3s, is_ls = wrbkisp3.sp3_run(p1, p2, k, d)
+        if is_ls:
+            return []
+        if len(q3s) == 0:
+            return []
+        all_qs = []
+        for q3 in q3s:
+            R23 = wum.rotmat_from_axangle(self.h3, q3)
+            p23plusR23p34 = self.p23 + R23 @ self.p34
+            # compute q1, q2 by sp2
+            # R10p16 = R12(p23+R23p34)
+            p1 = p16
+            p2 = p23plusR23p34
+            k1 = -self.h1
+            k2 = self.h2
+            q1s, q2s, is_sl = wrbkisp2.sp2_run(p1, p2, k1, k2)
+            if is_sl:
+                continue
+            else:
+                q1s = np.asarray(q1s).reshape(-1)
+                q2s = np.asarray(q2s).reshape(-1)
+                pairs = list(zip(q1s, q2s))
+            for q1, q2 in pairs:
+                R01 = wum.rotmat_from_axangle(self.h1, q1)
+                R12 = wum.rotmat_from_axangle(self.h2, q2)
+                R03 = R01 @ R12 @ R23
+                R36 = R03.T @ R06
+                # compute q4, q5 by sp2
+                # R43R36h6 = R45h6
+                p1 = R36 @ self.h6
+                k1 = -self.h4
+                p2 = self.h6
+                k2 = self.h5
+                q4s, q5s, is_sl = wrbkisp2.sp2_run(p1, p2, k1, k2)
+                if is_sl:
+                    continue
+                else:
+                    q4s = np.asarray(q4s).reshape(-1)
+                    q5s = np.asarray(q5s).reshape(-1)
+                    pairs = list(zip(q4s, q5s))
+                for q4, q5 in pairs:
+                    R43 = wum.rotmat_from_axangle(-self.h4, q4)
+                    R54 = wum.rotmat_from_axangle(-self.h5, q5)
+                    p1 = wum.orth_vec(self.h6)
+                    k = self.h6
+                    p2 = R54 @ R43 @ R36 @ p1
+                    # compute q6 by sp1 with the looser sp1_tol: the float32
+                    # closure residual trips the tight is_LS even for valid
+                    # branches (see sp1_tol).
+                    q6, is_ls = wrbkisp1.sp1_run(p1, p2, k, tol=self.sp1_tol)
+                    if is_ls:
+                        continue
+                    qs = np.array([q1, q2, q3, q4, q5, q6], dtype=np.float32)
+                    all_qs.append(qs)
+        return all_qs
+
+
+class P234X56(AnaIKBase):
+    # Structural tolerances. parallel_tol: max |sin| misalignment of axes
+    # 2,3,4 (P234). intersect_tol: max miss (m) of axes 5,6 (X56). Above
+    # these the analytic decomposition only approximates the chain.
+    parallel_tol = 1e-6
+    intersect_tol = 1e-6
+
+    def __init__(self, chain, joint_limits=None,
+                 parallel_tol=None, intersect_tol=None):
+        super().__init__(chain, joint_limits=joint_limits)
+        ptol = self.parallel_tol if parallel_tol is None else parallel_tol
+        itol = self.intersect_tol if intersect_tol is None else intersect_tol
+        o = [np.asarray(self.chain.origins[i], dtype=np.float32)
+             for i in range(6)]
+        a = [wum.unit_vec(self.chain.axes[i], return_length=False)
+             for i in range(6)]
+        # Reject chains that are not actually P234 (axes 2,3,4 parallel -- the
+        # decomposition folds q2+q3+q4 into one rotation about their common
+        # axis) + X56 (axes 5,6 intersect at the wrist center o56). Unlike
+        # S456X12 this solver already uses the full link offsets (no origin
+        # relocation needed); it just silently assumes the structure, so guard.
+        par_gap = max(float(np.linalg.norm(np.cross(a[1], a[2]))),
+                      float(np.linalg.norm(np.cross(a[1], a[3]))))
+        if par_gap > ptol:
+            raise ValueError(
+                f"P234X56: axes 2,3,4 are not parallel; misalignment "
+                f"|sin| = {par_gap:.2e} > {ptol:.0e}")
+        wrist = wum.closest_point_between_lines(o[4], a[4], o[5], a[5])
+        if wrist is None or wrist[1] > itol:
+            gap = float('inf') if wrist is None else wrist[1]
+            raise ValueError(
+                f"P234X56: axes 5 and 6 do not intersect (not X56); "
+                f"gap = {gap * 1e3:.3f} mm > {itol * 1e3:.3f} mm")
+        o56 = wrist[0].astype(np.float32)
+        # paper-style vectors
+        self.p01 = o[0].astype(np.float32)
+        self.p12 = (o[1] - o[0]).astype(np.float32)
+        self.p23 = (o[2] - o[1]).astype(np.float32)
+        self.p34 = (o[3] - o[2]).astype(np.float32)
+        self.p45 = (o56 - o[3]).astype(np.float32)
+        self.p56 = np.zeros(3, dtype=np.float32)
+        self.p6t = (o[5] - o56).astype(np.float32)
+        self.h1 = self.chain.axes[0]
+        self.h2 = self.chain.axes[1]
+        self.h3 = self.chain.axes[2]
+        self.h4 = self.chain.axes[3]
+        self.h5 = self.chain.axes[4]
+        self.h6 = self.chain.axes[5]
+
+    def ik_all(self, tgt_tf_in_root, **kwargs):
+        # compute q1 by sp4
+        # h2.T R10 p16 = h2.T(p12+p23+p34+p45)
+        # p16 = p0t - R06 p6t - p01
+        p06 = tgt_tf_in_root[:3, 3]
+        R06 = tgt_tf_in_root[:3, :3] @ self.chain.tfs[-1][:3, :3].T
+        p16 = p06 - R06 @ self.p6t - self.p01
+        h = self.h2
+        k = -self.h1
+        p = p16
+        d = self.h2.T @ (self.p12 + self.p23 + self.p34 + self.p45)
+        q1s, is_ls = wrbkisp4.sp4_run(p, k, h, d)
+        if is_ls:
+            return []
+        if len(q1s) == 0:
+            return []
+        all_qs = []
+        for q1 in q1s:
+            # compute q5 by sp4
+            # h2.T R10 R06 h6 - h2.T R45 h6 = 0
+            R10 = wum.rotmat_from_axangle(-self.h1, q1)
+            h = self.h2
+            k = self.h5
+            p = self.h6
+            d = self.h2.T @ (R10 @ R06 @ self.h6)
+            q5s, is_ls = wrbkisp4.sp4_run(p, k, h, d)
+            if is_ls:
+                continue
+            if len(q5s) == 0:
+                continue
+            for q5 in q5s:
+                # compute q2+q3+q4 by sp1
+                # R14 R45 h6 = R10 R06 h6
+                R45 = wum.rotmat_from_axangle(self.h5, q5)
+                k = self.h2  # assume all parallel axes have same direction as h2
+                p1 = R45 @ self.h6
+                p2 = R10 @ R06 @ self.h6
+                q234, is_ls = wrbkisp1.sp1_run(p1, p2, k, tol=self.sp1_tol)
+                if is_ls:
+                    continue
+                R14 = wum.rotmat_from_axangle(self.h2, q234)
+                # compute q6 by sp1
+                # R65 R54 h2 = R06.T R01 h2
+                R01 = R10.T
+                k = -self.h6
+                p1 = R45.T @ self.h2
+                p2 = R06.T @ R01 @ self.h2
+                q6, is_ls = wrbkisp1.sp1_run(p1, p2, k, tol=self.sp1_tol)
+                if is_ls:
+                    continue
+                # compute q3 by sp3
+                # R23 p34 + p23 = R10 p16 - p12 - R14 p45 - R15 p56
+                rhs = R10 @ p16 - self.p12 - R14 @ self.p45
+                d = np.linalg.norm(rhs)
+                p1 = self.p34
+                p2 = -self.p23
+                k = self.h3
+                q3s, is_ls = wrbkisp3.sp3_run(p1, p2, k, d)
+                if is_ls:
+                    continue
+                if len(q3s) == 0:
+                    continue
+                for q3 in q3s:
+                    R23 = wum.rotmat_from_axangle(self.h3, q3)
+                    # compute q2 by sp1
+                    # R12 (p23 + R23 p34) = R10 p16 - p12 - R14 p45
+                    p2 = rhs
+                    p1 = self.p23 + R23 @ self.p34
+                    k = self.h2
+                    q2, is_ls = wrbkisp1.sp1_run(p1, p2, k, tol=self.sp1_tol)
+                    if is_ls:
+                        continue
+                    # compute q4 by subtraction
+                    if self.h4.T @ self.h2 > 0:
+                        q4 = q234 - q2 - q3
+                    else:
+                        q4 = q234 - q2 + q3
+                    qs = np.array([q1, q2, q3, q4, q5, q6], dtype=np.float32)
+                    all_qs.append(qs)
+        return all_qs

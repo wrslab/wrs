@@ -1,0 +1,237 @@
+import os
+
+import numpy as np
+
+import wrs.utils.math as wum
+import wrs.utils.constant as wuc
+import wrs.robots.base.mech_structure as wrbms
+import wrs.robots.base.mech_base as wrbmb
+import wrs.robots.end_effectors.ee_mixins as wreb
+
+
+def prepare_ms():
+    structure = wrbms.MechStruct()
+    mesh_dir = structure.default_mesh_dir
+
+    base_lnk = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'robotiq_base.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.SILVER,
+    )
+    l_knuckle = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'left_knuckle.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.STEEL_BLUE,
+    )
+    r_knuckle = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'right_knuckle.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.SALMON_PINK,
+    )
+    l_finger = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'left_finger.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.STEEL_BLUE,
+    )
+    r_finger = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'right_finger.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.SALMON_PINK,
+    )
+    l_inner_knuckle = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'left_inner_knuckle.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.DIM_GRAY,
+    )
+    r_inner_knuckle = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'right_inner_knuckle.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.DIM_GRAY,
+    )
+    l_tip = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'left_finger_tip.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.DIM_GRAY,
+    )
+    r_tip = wrbms.Link.from_file(
+        os.path.join(mesh_dir, 'right_finger_tip.stl'),
+        collision_type=wuc.CollisionType.MESH,
+        rgb=wuc.ExtendedColor.DIM_GRAY,
+    )
+
+    j_l_knuckle = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=base_lnk,
+        child_lnk=l_knuckle,
+        axis=-wuc.StandardAxis.Y,
+        pos=np.array([0.03060114, 0.0, 0.05490452], dtype=np.float32),
+        lmt_lo=0.0,
+        lmt_up=0.8,
+    )
+    j_r_knuckle = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=base_lnk,
+        child_lnk=r_knuckle,
+        axis=-wuc.StandardAxis.Y,
+        pos=np.array([-0.03060114, 0.0, 0.05490452], dtype=np.float32),
+        mmc=(j_l_knuckle, -1.0, 0.0),
+        lmt_lo=-0.8,
+        lmt_up=0.0,
+    )
+    j_l_finger = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=l_knuckle,
+        child_lnk=l_finger,
+        axis=wuc.StandardAxis.Z,
+        pos=np.array([0.03152616, 0.0, -0.00376347], dtype=np.float32),
+        lmt_lo=0.0,
+        lmt_up=0.0,
+    )
+    j_r_finger = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=r_knuckle,
+        child_lnk=r_finger,
+        axis=wuc.StandardAxis.Z,
+        pos=np.array([-0.03152616, 0.0, -0.00376347], dtype=np.float32),
+        lmt_lo=0.0,
+        lmt_up=0.0,
+    )
+    j_l_inner_knuckle = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=base_lnk,
+        child_lnk=l_inner_knuckle,
+        axis=-wuc.StandardAxis.Y,
+        pos=np.array([0.0127, 0.0, 0.06142], dtype=np.float32),
+        mmc=(j_l_knuckle, 1.0, 0.0),
+    )
+    j_r_inner_knuckle = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=base_lnk,
+        child_lnk=r_inner_knuckle,
+        axis=-wuc.StandardAxis.Y,
+        pos=np.array([-0.0127, 0.0, 0.06142], dtype=np.float32),
+        mmc=(j_l_knuckle, -1.0, 0.0),
+    )
+    j_l_tip = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=l_finger,
+        child_lnk=l_tip,
+        axis=-wuc.StandardAxis.Y,
+        pos=np.array([0.00563134, 0.0, 0.04718515], dtype=np.float32),
+        mmc=(j_l_knuckle, -1.0, 0.0),
+    )
+    j_r_tip = wrbms.Joint(
+        jnt_type=wuc.JntType.REVOLUTE,
+        parent_lnk=r_finger,
+        child_lnk=r_tip,
+        axis=-wuc.StandardAxis.Y,
+        pos=np.array([-0.00563134, 0.0, 0.04718515], dtype=np.float32),
+        mmc=(j_l_knuckle, 1.0, 0.0),
+    )
+
+    for lnk in [
+        base_lnk,
+        l_knuckle,
+        r_knuckle,
+        l_finger,
+        r_finger,
+        l_inner_knuckle,
+        r_inner_knuckle,
+        l_tip,
+        r_tip,
+    ]:
+        structure.add_lnk(lnk)
+    for jnt in [
+        j_l_knuckle,
+        j_r_knuckle,
+        j_l_finger,
+        j_r_finger,
+        j_l_inner_knuckle,
+        j_r_inner_knuckle,
+        j_l_tip,
+        j_r_tip,
+    ]:
+        structure.add_jnt(jnt)
+
+    structure.ignore_collision(l_tip, r_tip)
+    structure.ignore_collision(l_finger, r_finger)
+    structure.ignore_collision(l_inner_knuckle, r_inner_knuckle)
+    structure.compile()
+    return structure
+
+
+class Rtq2F85(wrbmb.MechBase, wreb.GripperMixin):
+
+    @classmethod
+    def _build_structure(cls):
+        return prepare_ms()
+
+    def __init__(self):
+        super().__init__()
+        self.add_tcp('grasp_center', self.runtime_root_lnk,
+                     wum.tf_from_pos_rotmat(pos=(0.0, 0.0, 0.15)))
+        self.contact_pattern = np.zeros((1, 3), dtype=np.float32)
+        self.jaw_range = np.array([0.0, 0.085], dtype=np.float32)
+        self.open_dir = wuc.StandardAxis.X  # defined in tcp_rotmat
+        self.set_opening(self.jaw_range[1])
+
+    def set_opening(self, jaw_width):
+        if jaw_width < self.jaw_range[0] or jaw_width > self.jaw_range[1]:
+            raise ValueError(f'jaw_width {jaw_width} out of range {self.jaw_range}')
+        close_ratio = 1.0 - jaw_width / self.jaw_range[1]
+        q_main = 0.8 * close_ratio
+        qs = np.zeros(self.structure.compiled.n_jnts, dtype=np.float32)
+        qs[0] = q_main
+        self.fk(qs=qs)
+
+    def clone(self):
+        new = super().clone()
+        new.contact_pattern = self.contact_pattern.copy()
+        new.jaw_range = self.jaw_range.copy()
+        new.open_dir = self.open_dir
+        jaw_width = self.jaw_range[1] * (1.0 - self.qs[0] / 0.8)
+        new.set_opening(jaw_width)
+        return new
+
+
+if __name__ == '__main__':
+    import builtins
+    import math
+
+    import wrs.viewer.world as wvw
+    import wrs.scene.scene_object_primitive as wssop
+
+    base = wvw.World(cam_pos=(0.45, -0.45, 0.28), cam_lookat_pos=(0.10, 0.0, 0.08))
+    builtins.base = base
+    wssop.frame().add_to_scene(base.scene)
+
+    jaw_widths = [0.0, 0.02, 0.04, 0.06, 0.085]
+    template = Rtq2F85()
+    grippers = []
+    phases = []
+    for i, jaw_width in enumerate(jaw_widths):
+        gripper = template.clone()
+        gripper.set_opening(jaw_width)
+        gripper.set_pos_rotmat(pos=(0.10 * i, 0.0, 0.0))
+        gripper.add_to_scene(base.scene)
+        grippers.append(gripper)
+        phases.append(i * 0.5)
+        _tf = gripper.tcp('grasp_center').tf
+        wssop.frame(pos=_tf[:3, 3],
+                    rotmat=_tf[:3, :3],
+                    color_mat=wuc.CoordColor.MYC).add_to_scene(base.scene)
+        print(f'gripper[{i}] jaw_width={jaw_width:.3f} m')
+
+    t = [0.0]
+    min_w, max_w = 0.0, 0.085
+    amp = 0.5 * (max_w - min_w)
+    mid = 0.5 * (max_w + min_w)
+
+    def update(dt, t, grippers, phases):
+        t[0] += dt
+        for i, gripper in enumerate(grippers):
+            width = mid + amp * math.sin(2.0 * math.pi * 0.5 * t[0] + phases[i])
+            gripper.set_opening(width)
+
+    base.schedule_interval(update, interval=1.0 / 60.0, t=t, grippers=grippers, phases=phases)
+    base.run()

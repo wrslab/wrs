@@ -1,0 +1,611 @@
+import numpy as np
+import wrs.utils.math as wum
+import wrs.utils.constant as wuc
+import wrs.scene.scene_object as wsso
+import wrs.scene.render_model_primitive as wsrmp
+
+
+# kwargs in the functions are defined as in _parse_phys
+def _parse_phys(kwargs):
+    # Reject unknown kwargs loudly: primitives take **kwargs only for these
+    # keys, so a typo'd or unsupported name (xyz_length=, collision=, colour=,
+    # ...) would otherwise be silently swallowed and ignored.
+    extra = set(kwargs) - {
+        "inertia", "com", "mass", "collision_type", "is_floating", "name"}
+    if extra:
+        raise TypeError(
+            f"unexpected keyword argument(s) {sorted(extra)} (primitives accept "
+            f"only inertia/com/mass/collision_type/is_floating/name as extra kwargs)")
+    return (
+        kwargs.get("inertia", None),
+        kwargs.get("com", None),
+        kwargs.get("mass", None),
+        kwargs.get("collision_type", None),
+        kwargs.get("is_floating", False),
+        kwargs.get("name", None),
+    )
+
+
+def _add_dashed_arrow_visuals(o, axis_rotmat, axis_origin, length,
+                              shaft_radius, head_radius, head_length,
+                              len_solid, len_interval, n_segs,
+                              rgb, alpha, amc):
+    """Append dashed-shaft (+ optional solid head) visuals to `o`, drawn from
+    `axis_origin` along the +Z direction of `axis_rotmat`, expressed in `o`'s
+    local frame. Pass head_length<=0 to draw shaft only."""
+    head_length = max(0.0, float(head_length))
+    shaft_len = max(0.0, float(length) - head_length)
+    z_local = axis_rotmat[:, 2]
+    d = 0.0
+    while d < shaft_len:
+        dash_len = min(len_solid, shaft_len - d)
+        if dash_len > 1e-8:
+            rmodel = wsrmp.gen_cylinder_rmodel(
+                length=dash_len, radius=shaft_radius, n_segs=n_segs,
+                rotmat=axis_rotmat, pos=axis_origin + z_local * d,
+                rgb=rgb, alpha=alpha,
+            )
+            o.add_visual(rmodel, auto_make_collision=amc)
+        d += len_solid + len_interval
+    if head_length > 0:
+        head_rmodel = wsrmp.gen_arrow_rmodel(
+            length=head_length,
+            shaft_radius=shaft_radius,
+            head_length=head_length,
+            head_radius=head_radius,
+            n_segs=n_segs,
+            rotmat=axis_rotmat,
+            pos=axis_origin + z_local * shaft_len,
+            rgb=rgb, alpha=alpha,
+        )
+        o.add_visual(head_rmodel, auto_make_collision=amc)
+
+
+def cylinder(
+    spos=(0, 0, 0),
+    epos=(0.01, 0.01, 0.01),
+    radius=0.05,
+    segments=8,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    spos = np.asarray(spos, np.float32)
+    epos = np.asarray(epos, np.float32)
+    length, dir_vec = wum.unit_vec(epos - spos, return_length=True)
+    rmodel = wsrmp.gen_cylinder_rmodel(
+        length=length, radius=radius, n_segs=segments, rgb=rgb, alpha=alpha
+    )
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, dir_vec)
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.set_pos_rotmat(pos=spos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def dashed_cylinder(
+    spos=(0, 0, 0),
+    epos=(0.01, 0.01, 0.01),
+    radius=0.05,
+    len_solid=None,
+    len_interval=None,
+    segments=8,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    spos = np.asarray(spos, np.float32)
+    epos = np.asarray(epos, np.float32)
+    length, dir_vec = wum.unit_vec(epos - spos, return_length=True)
+    radius = float(radius)
+    if len_solid is None:
+        len_solid = radius * 3.2
+    if len_interval is None:
+        len_interval = radius * 2.14
+    len_solid = float(len_solid)
+    len_interval = float(len_interval)
+
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    if float(length) <= 1e-8:
+        rmodel = wsrmp.gen_cylinder_rmodel(
+            length=1e-6, radius=radius, n_segs=segments, rgb=rgb, alpha=alpha
+        )
+        o.add_visual(rmodel, auto_make_collision=amc)
+        o.set_pos_rotmat(pos=spos)
+        o.set_inertia(inertia, com, mass)
+        return o
+
+    _add_dashed_arrow_visuals(
+        o, axis_rotmat=np.eye(3, dtype=np.float32),
+        axis_origin=np.zeros(3, dtype=np.float32),
+        length=length,
+        shaft_radius=radius, head_radius=0.0, head_length=0.0,
+        len_solid=len_solid, len_interval=len_interval, n_segs=segments,
+        rgb=rgb, alpha=alpha, amc=amc,
+    )
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, dir_vec)
+    o.set_pos_rotmat(pos=spos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def cone(
+    spos=(0, 0, 0),
+    epos=(0.01, 0.01, 0.01),
+    radius=0.05,
+    segments=8,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    spos = np.asarray(spos, np.float32)
+    epos = np.asarray(epos, np.float32)
+    length, dir_vec = wum.unit_vec(epos - spos, return_length=True)
+    rmodel = wsrmp.gen_cone_rmodel(
+        length=length, radius=radius, n_segs=segments, rgb=rgb, alpha=alpha
+    )
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, dir_vec)
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.set_pos_rotmat(pos=spos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def sphere(
+    pos=(0, 0, 0),
+    radius=0.05,
+    segments=8,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    rmodel = wsrmp.gen_sphere_rmodel(
+        radius=radius, n_segs=segments, rgb=rgb, alpha=alpha
+    )
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.pos = pos
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def icosphere(
+    pos=(0, 0, 0),
+    radius=0.05,
+    subdivisions=2,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    rmodel = wsrmp.gen_icosphere_rmodel(
+        radius=radius, n_subs=subdivisions, rgb=rgb, alpha=alpha
+    )
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.pos = pos
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def box(
+    pos=(0, 0, 0),
+    xyz_lengths=(0.1, 0.1, 0.1),
+    rotmat=None,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    xyz_lengths = np.asarray(xyz_lengths, np.float32)
+    rmodel = wsrmp.gen_box_rmodel(
+        xyz_lengths=xyz_lengths, rgb=rgb, alpha=alpha)
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.set_pos_rotmat(pos=pos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def linsegs(segs, radius=0.001, srgbs=None, alpha=1.0):
+    """segs: (N,2,3), srgb: None | scalar | (3,) | (N,3)
+    returns: SceneObject with N cylinder segments"""
+    segs = np.asarray(segs, dtype=np.float32)
+    if segs.ndim != 3 or segs.shape[1:] != (2, 3):
+        raise ValueError("segs must be (N,2,3)")
+    n = segs.shape[0]
+    if srgbs is None:
+        srgbs = np.tile(np.array(wuc.BasicColor.BLACK,
+                        dtype=np.float32), (n, 1))
+    elif srgbs.shape == (3,):
+        srgbs = np.tile(srgbs, (n, 1))
+    elif srgbs.shape == (n, 3):
+        srgbs = np.asarray(srgbs, dtype=np.float32)
+    else:
+        raise ValueError("srgb must be scalar, (3,), or (N,3)")
+    # build single SceneObject
+    o = wsso.SceneObject(collision_type=None, is_floating=False)
+    for i in range(n):
+        a = segs[i, 0]
+        b = segs[i, 1]
+        if np.linalg.norm(b - a) < 1e-12:
+            continue
+        length, dir_vec = wum.unit_vec(b - a, return_length=True)
+        rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, dir_vec)
+        rmodel = wsrmp.gen_cylinder_rmodel(
+            length=length,
+            radius=radius,
+            rotmat=rotmat,
+            pos=a,
+            rgb=srgbs[i],
+            alpha=alpha,
+        )
+        o.add_visual(rmodel, auto_make_collision=False)
+    return o
+
+
+def arrow(
+    spos=np.zeros(3),
+    epos=np.ones(3) * 0.01,
+    shaft_radius=wuc.ArrowSize.SHAFT_RADIUS,
+    head_radius=wuc.ArrowSize.HEAD_RADIUS,
+    head_length=wuc.ArrowSize.HEAD_LENGTH,
+    n_segs=8,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    # if is_floating:
+    #     print("Warning: frame is usually not free. Setting to False.")
+    #     is_floating = False
+    is_floating = False
+    # collider must be ignored for arrow
+    spos = np.asarray(spos, np.float32)
+    epos = np.asarray(epos, np.float32)
+    length, dir_vec = wum.unit_vec(epos - spos, return_length=True)
+    rmodel = wsrmp.gen_arrow_rmodel(
+        length, shaft_radius, head_length, head_radius,
+        n_segs, rgb=rgb, alpha=alpha
+    )
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, dir_vec)
+    o.set_pos_rotmat(pos=spos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def dashed_arrow(
+    spos=np.zeros(3),
+    epos=np.ones(3) * 0.01,
+    shaft_radius=wuc.ArrowSize.SHAFT_RADIUS,
+    head_radius=wuc.ArrowSize.HEAD_RADIUS,
+    head_length=wuc.ArrowSize.HEAD_LENGTH,
+    len_solid=None,
+    len_interval=None,
+    n_segs=8,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    is_floating = False
+    spos = np.asarray(spos, np.float32)
+    epos = np.asarray(epos, np.float32)
+    length, dir_vec = wum.unit_vec(epos - spos, return_length=True)
+    shaft_radius = float(shaft_radius)
+    head_length = float(head_length)
+    head_radius = float(head_radius)
+    if len_solid is None:
+        len_solid = shaft_radius * 3.2
+    if len_interval is None:
+        len_interval = shaft_radius * 2.14
+    len_solid = float(len_solid)
+    len_interval = float(len_interval)
+
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    if float(length) <= 1e-8:
+        o.set_pos_rotmat(pos=spos)
+        o.set_inertia(inertia, com, mass)
+        return o
+
+    _add_dashed_arrow_visuals(
+        o, axis_rotmat=np.eye(3, dtype=np.float32),
+        axis_origin=np.zeros(3, dtype=np.float32),
+        length=length,
+        shaft_radius=shaft_radius, head_radius=head_radius,
+        head_length=head_length,
+        len_solid=len_solid, len_interval=len_interval, n_segs=n_segs,
+        rgb=rgb, alpha=alpha, amc=amc,
+    )
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, dir_vec)
+    o.set_pos_rotmat(pos=spos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def frame_from_tf(
+    tf,
+    length_scale=1.0,
+    radius_scale=1.0,
+    n_segs=8,
+    color_mat=wuc.CoordColor.RGB,
+    alpha=1.0,
+    **kwargs,
+):
+    """Draw a coordinate frame at the pose given by a 4x4 transform."""
+    return frame(
+        pos=tf[:3, 3],
+        rotmat=tf[:3, :3],
+        length_scale=length_scale,
+        radius_scale=radius_scale,
+        n_segs=n_segs,
+        color_mat=color_mat,
+        alpha=alpha,
+        **kwargs,
+    )
+
+
+def frame(
+    pos=np.zeros(3),
+    rotmat=np.eye(3),
+    length_scale=1.0,
+    radius_scale=1.0,
+    n_segs=8,
+    color_mat=wuc.CoordColor.RGB,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    # if is_floating:
+    #     print("Warning: frame is usually not free. Setting to False.")
+    #     is_floating = False
+    is_floating = False
+    # collider must be ignored for frame
+    arrow_length = wuc.StandardAxis.ARROW_LENGTH * length_scale
+    shaft_radius = wuc.StandardAxis.ARROW_SHAFT_RADIUS * radius_scale
+    head_length = wuc.StandardAxis.ARROW_HEAD_LENGTH * radius_scale
+    head_radius = wuc.StandardAxis.ARROW_HEAD_RADIUS * radius_scale
+    rmodel_x = wsrmp.gen_arrow_rmodel(
+        arrow_length,
+        shaft_radius,
+        head_length,
+        head_radius,
+        n_segs,
+        wum.rotmat_from_axangle(wuc.StandardAxis.Y, np.pi / 2),
+        rgb=color_mat[:, 0],
+        alpha=alpha,
+    )
+    rmodel_y = wsrmp.gen_arrow_rmodel(
+        arrow_length,
+        shaft_radius,
+        head_length,
+        head_radius,
+        n_segs,
+        wum.rotmat_from_axangle(wuc.StandardAxis.X, -np.pi / 2),
+        rgb=color_mat[:, 1],
+        alpha=alpha,
+    )
+    rmodel_z = wsrmp.gen_arrow_rmodel(
+        arrow_length,
+        shaft_radius,
+        head_length,
+        head_radius,
+        n_segs,
+        rgb=color_mat[:, 2],
+        alpha=alpha,
+    )
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel_x, auto_make_collision=amc)
+    o.add_visual(rmodel_y, auto_make_collision=amc)
+    o.add_visual(rmodel_z, auto_make_collision=amc)
+    o.set_pos_rotmat(pos=pos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def dashed_frame(
+    pos=np.zeros(3),
+    rotmat=np.eye(3),
+    length_scale=1.0,
+    radius_scale=1.0,
+    len_solid=None,
+    len_interval=None,
+    n_segs=8,
+    color_mat=wuc.CoordColor.RGB,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    is_floating = False
+    arrow_length = wuc.StandardAxis.ARROW_LENGTH * length_scale
+    shaft_radius = wuc.StandardAxis.ARROW_SHAFT_RADIUS * radius_scale
+    head_length = wuc.StandardAxis.ARROW_HEAD_LENGTH * radius_scale
+    head_radius = wuc.StandardAxis.ARROW_HEAD_RADIUS * radius_scale
+    if len_solid is None:
+        len_solid = shaft_radius * 3.2
+    if len_interval is None:
+        len_interval = shaft_radius * 2.14
+    len_solid = float(len_solid)
+    len_interval = float(len_interval)
+
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    axis_rots = [
+        wum.rotmat_from_axangle(wuc.StandardAxis.Y, np.pi / 2),
+        wum.rotmat_from_axangle(wuc.StandardAxis.X, -np.pi / 2),
+        np.eye(3, dtype=np.float32),
+    ]
+    origin = np.zeros(3, dtype=np.float32)
+    for i in range(3):
+        _add_dashed_arrow_visuals(
+            o, axis_rotmat=axis_rots[i], axis_origin=origin,
+            length=arrow_length,
+            shaft_radius=shaft_radius, head_radius=head_radius,
+            head_length=head_length,
+            len_solid=len_solid, len_interval=len_interval, n_segs=n_segs,
+            rgb=color_mat[:, i], alpha=alpha, amc=amc,
+        )
+    o.set_pos_rotmat(pos=pos, rotmat=rotmat)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def plane(
+    pos=(0, 0, 0),
+    normal=wuc.StandardAxis.Z,
+    size=(100.0, 100.0),
+    thickness=1e-3,
+    rgb=wuc.BasicColor.GRAY,
+    alpha=1.0,
+):
+    pos = np.asarray(pos, np.float32)
+    size = np.asarray(size, np.float32)
+    xyz_lengths = np.array(
+        [size[0], size[1], thickness], np.float32)
+    rmodel = wsrmp.gen_box_rmodel(
+        xyz_lengths=xyz_lengths, rgb=rgb, alpha=alpha)
+    o = wsso.SceneObject(collision_type=wuc.CollisionType.PLANE, is_floating=False)
+    o.add_visual(rmodel)
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, normal)
+    o.set_pos_rotmat(pos=pos, rotmat=rotmat)
+    return o
+
+
+def point_cloud(vs, vrgbs, alpha=1.0):
+    """
+    Build a point-cloud SceneObject from per-vertex positions and colors.
+    vs:    (N, 3) float, vertex positions
+    vrgbs: (N, 3) float in [0, 1], per-vertex RGB
+    alpha: scalar in [0, 1], opacity
+    """
+    vs = np.asarray(vs, np.float32)
+    rmodel = wsrmp.gen_pcd_rmodel(vs, vrgbs, alpha)
+    o = wsso.SceneObject(collision_type=None, is_floating=False)
+    o.add_visual(rmodel, auto_make_collision=False)
+    return o
+
+
+def frustrum(
+    base_center=(0, 0, 0),
+    top_center=(0, 0, 0.05),
+    bottom_length=0.05,
+    top_length=0.03,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, collision_type, is_floating, name = _psd
+    base_center = np.asarray(base_center, dtype=np.float32)
+    top_center = np.asarray(top_center, dtype=np.float32)
+    axis = top_center - base_center
+    height, axis_u = wum.unit_vec(axis, return_length=True)
+    if float(height) < 1e-8:
+        height = 0.05
+        axis_u = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    rotmat = wum.rotmat_between_vecs(wuc.StandardAxis.Z, axis_u)
+    rmodel = wsrmp.gen_frustrum_rmodel(
+        height=float(height),
+        bottom_length=bottom_length,
+        top_length=top_length,
+        rotmat=rotmat,
+        pos=base_center,
+        rgb=rgb,
+        alpha=alpha,
+    )
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+def mesh(
+    vs,
+    fs,
+    collision_type=None,
+    is_floating=False,
+    rgb=wuc.BasicColor.DEFAULT,
+    alpha=1.0,
+    **kwargs,
+):
+    """
+    Build a SceneObject from user-specified vertices/faces.
+    vs: (N,3), fs: (M,3)
+    """
+    _psd = _parse_phys(kwargs)
+    inertia, com, mass, _, _, name = _psd
+    vs = np.asarray(vs, np.float32)
+    fs = np.asarray(fs, np.uint32)
+    rmodel = wsrmp.gen_mesh_rmodel(vs=vs, fs=fs, rgb=rgb, alpha=alpha)
+    o = wsso.SceneObject(collision_type=collision_type, is_floating=is_floating,
+                         name=name)
+    amc = False if collision_type is None else True
+    o.add_visual(rmodel, auto_make_collision=amc)
+    o.set_inertia(inertia, com, mass)
+    return o
+
+
+if __name__ == "__main__":
+    import wrs.viewer.world as wvw
+
+    base = wvw.World(cam_pos=(1, 1, 1), cam_lookat_pos=(0.0, 0.0, 0.0))
+    # test frustrum
+    o = frustrum(
+        base_center=(0, 0, 0),
+        top_center=(0.0, 0.0, 0.2),
+        bottom_length=0.1,
+        top_length=0.05,
+        rgb=wuc.BasicColor.RED,
+        alpha=0.8,
+        collision_type=wuc.CollisionType.MESH,
+    )
+    o.add_to_scene(base.scene)
+
+    o2 = dashed_cylinder(
+        spos=(0.2, 0.0, 0.0),
+        epos=(0.2, 0.0, 0.5),
+        radius=0.02,
+        collision_type=wuc.CollisionType.MESH,
+    )
+    o2.add_to_scene(base.scene)
+    o2.toggle_render_collision = True
+    base.run()

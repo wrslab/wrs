@@ -1,0 +1,67 @@
+"""Draw the grasp TARGET frames and the robot's grasp-center TCP for the
+cylinder at l1picking's current CYL_POS -- to eyeball why nothing is reachable.
+
+    RGB small frames   = the grasp targets (where the hand's grasp-center must
+                         land), one per loaded grasp; pre-grasp frames are faint.
+    MYC big frame      = the robot's grasp-center tcp at HOME (the frame IK
+                         tries to drive onto each target).
+
+Robot stays at home; no planning. So the visual question is just: are the RGB
+target frames anywhere near where the MYC tcp frame can sweep?
+"""
+import os
+import sys
+import builtins
+
+import numpy as np
+
+_THIS = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_THIS))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+if _THIS not in sys.path:
+    sys.path.insert(0, _THIS)
+
+import wrs.utils.constant as wuc                               # noqa: E402
+import wrs.scene.scene_object_primitive as wssop               # noqa: E402
+import wrs.robots.base.tcp as wrbt                             # noqa: E402
+import wrs.viewer.world as wvw                                 # noqa: E402
+
+from l1picking import build_scene, load_world_grasps           # noqa: E402
+
+
+def main():
+    robot, table, cyl, ground = build_scene()
+    grasps = load_world_grasps(cyl)
+    jaw = robot.left_hand.as_jaw('pinch')
+    print(f"{len(grasps)} grasps; cylinder at {np.round(cyl.pos, 3)}")
+
+    base = wvw.World(cam_pos=(1.5, -0.4, 1.4), cam_lookat_pos=(0.15, 0.2, 1.0))
+    builtins.base = base
+    wssop.frame().add_to_scene(base.scene)               # world frame
+    for e in (robot, *table, cyl, ground):
+        e.add_to_scene(base.scene)
+
+    # grasp target frames (RGB), pre-grasp frames faint
+    for grasp in grasps:
+        pose, pre = grasp.pose, grasp.pre_pose
+        wssop.frame(pos=pose[:3, 3], rotmat=pose[:3, :3],
+                    length_scale=0.22).add_to_scene(base.scene)
+        f = wssop.frame(pos=pre[:3, 3], rotmat=pre[:3, :3], length_scale=0.16)
+        f.alpha = 0.3
+        f.add_to_scene(base.scene)
+
+    # robot's grasp-center tcp at HOME (the IK target frame), drawn in MYC
+    jw0 = float(jaw.jaw_range[1]) * 0.5
+    center_tcp = wrbt.TCP(robot.left_hand.runtime_root_lnk,
+                          jaw.grasp_center_tcp(jw0).loc_tf)
+    tf = center_tcp.tf
+    print("robot grasp-center tcp (home) pos:", np.round(tf[:3, 3], 3))
+    wssop.frame(pos=tf[:3, 3], rotmat=tf[:3, :3], length_scale=0.6,
+                color_mat=wuc.CoordColor.MYC).add_to_scene(base.scene)
+
+    base.run()
+
+
+if __name__ == "__main__":
+    main()

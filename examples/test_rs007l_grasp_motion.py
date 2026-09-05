@@ -1,0 +1,272 @@
+import numpy as np
+
+import wrs.geom.fitting as wgf
+import wrs.geom.surface as wgs
+import wrs.grasp.placement as wgp
+import wrs.collider.mj_collider as wcm
+import wrs.viewer.key as key
+from wrs.grasp.antipodal import antipodal
+from wrs import wum, wuc, wvw, wssop, wsso, khi_rs007l, or_2fg7
+from wrs import wmppc, wmpp
+
+base = wvw.World(
+    cam_pos=(2, 2, 1.5),
+    cam_lookat_pos=(0, 0, 0.75),
+    toggle_auto_cam_orbit=False
+)
+wssop.frame().add_to_scene(base.scene)
+
+robot = khi_rs007l.RS007L()
+robot.add_to_scene(base.scene)
+
+gripper = or_2fg7.OR2FG7()
+gripper.add_to_scene(base.scene)
+robot.mount(gripper, robot.runtime_lnks[-1], update=True)
+
+# load bunny
+bunny = wsso.SceneObject.from_file(
+    "bunny.stl", collision_type=wuc.CollisionType.MESH)
+bunny.rgb = (0.8, 0.7, 0.6)
+# bunny.alpha = 0.6
+bunny.add_to_scene(base.scene)
+
+# create ground plane
+ground = wssop.plane(pos=(0, 0, 0.01))
+ground.add_to_scene(base.scene)
+
+# setup mj collider
+mjc = wcm.MJCollider()
+mjc.append(robot)
+mjc.append(gripper)
+mjc.append(bunny)
+mjc.append(ground)
+mjc.actors = [robot]
+mjc.compile(margin=0.0)
+
+pln_ctx = wmppc.PlanningContext(collider=mjc)
+planner = wmpp.LazyPRMPlanner(pln_ctx=pln_ctx)
+
+# --- compute antipodal grasps on bunny at origin ---
+print("Computing antipodal grasps on bunny...")
+grasps = antipodal(
+    gripper=gripper,
+    target_sobj=bunny,
+    density=0.01,
+    normal_tol_deg=20,
+    roll_step_deg=30,
+)[:80]
+print(f"Found {len(grasps)} collision-free grasps")
+
+# --- compute a random stable pose (convex hull) ---
+geom = bunny.collisions[0].geom
+geom_hull = wgf.convex_hull(geom)
+facets = wgs.segment_surface(geom_hull)
+
+stable_poses = wgp.compute_stable_poses(
+    geom_hull.vs, geom_hull.fs, facets, com=None, stable_thresh=10.0
+)
+
+print(f"Found {len(stable_poses)} stable poses")
+if not stable_poses:
+    print("No stable poses found, abort.")
+    base.run()
+
+# pick one stable pose at random
+pos, rotmat, seg_id, ratio, _ = stable_poses[0]
+print(f"Selected stable pose: seg={seg_id}, ratio={ratio:.6f}")
+
+pos += np.array([-0.5, 0.0, 0.0], dtype=np.float32)  # offset on table
+# place bunny
+bunny.pos = pos
+bunny.rotmat = rotmat
+
+# transform grasp poses into world (stable pose)
+tf_bunny = wum.tf_from_pos_rotmat(pos, rotmat)
+
+# dump all pre-grasp candidates for standalone IK diagnosis
+pre_pose_pos_list = []
+pre_pose_rot_list = []
+jaw_width_list = []
+for g in grasps:
+    gl_pre_pose = tf_bunny @ g.pre_pose
+    pre_pose_pos_list.append(gl_pre_pose[:3, 3].astype(np.float32))
+    pre_pose_rot_list.append(gl_pre_pose[:3, :3].astype(np.float32))
+    jaw_width_list.append(np.float32(g.provenance["jaw_width"]))
+if len(pre_pose_pos_list) > 0:
+    np.savez(
+        "rs007l_grasp_candidates.npz",
+        pre_pos=np.asarray(pre_pose_pos_list, dtype=np.float32),
+        pre_rot=np.asarray(pre_pose_rot_list, dtype=np.float32),
+        jaw_width=np.asarray(jaw_width_list, dtype=np.float32),
+    )
+    print(f"Saved {len(pre_pose_pos_list)} candidates"
+          f"to rs007l_grasp_candidates.npz")
+
+# --- solve IK for each grasp and visualize ---
+n_solved = 0
+n_failed = 0
+goal_qs = None
+aux_qs = None
+
+for g in grasps:
+    jaw_width = g.provenance["jaw_width"]
+    gl_pre_pose = tf_bunny @ g.pre_pose
+    pre_tgt_rotmat = gl_pre_pose[:3, :3]
+    pre_tgt_pos = gl_pre_pose[:3, 3]
+    _s = robot.ik(pre_tgt_pos, pre_tgt_rotmat, tcp=g.make_tcp(gripper), max_solutions=1)
+    qs = _s[0] if _s else None
+    if qs is None:
+        continue
+    mjc.set_mecba_qpos(gripper, (jaw_width / 2, jaw_width / 2))
+    pln_ctx.clear_cache()
+    if not pln_ctx.is_state_valid(qs):
+        continue
+
+    goal_qs = qs
+    aux_qs = (jaw_width / 2, jaw_width / 2)
+    goal_pre_pose = (pre_tgt_pos, pre_tgt_rotmat)
+    break
+
+
+if goal_qs is None:
+    # show failed pre-pose
+    if grasps:
+        g = grasps[0]
+        jaw_width = g.provenance["jaw_width"]
+        gl_pre_pose = tf_bunny @ g.pre_pose
+        ghost = gripper.clone()
+        ghost.grip_at(gl_pre_pose[:3, 3], gl_pre_pose[:3, :3], jaw_width)
+        ghost.rgb = (1.0, 0.0, 0.0)
+        ghost.alpha = 0.3
+        ghost.add_to_scene(base.scene)
+    print("No valid pre-pose IK found.")
+    base.run()
+
+# --- plan start -> pre and loop ---
+start_qs = robot.qs.copy()
+path = None
+state = start_qs.copy()
+cursor = 0
+current_target = goal_qs
+tol = 5e-3
+move_step = 0.02
+need_replan = True
+drawn_nodes = {}
+
+# robot.fk(qs=goal_qs)
+# gripper.fk(qs=aux_qs)
+# base.run()
+
+
+def move_bunny_once():
+    global need_replan, tf_bunny
+
+    moved = False
+    pos = np.array(bunny.pos, dtype=np.float32)
+
+    if base.input_manager.is_key_pressed(key.W):
+        pos[1] += move_step
+        moved = True
+    if base.input_manager.is_key_pressed(key.S):
+        pos[1] -= move_step
+        moved = True
+    if base.input_manager.is_key_pressed(key.A):
+        pos[0] -= move_step
+        moved = True
+    if base.input_manager.is_key_pressed(key.D):
+        pos[0] += move_step
+        moved = True
+    rot_step = np.deg2rad(10.0)
+    if base.input_manager.is_key_pressed(key.Q):
+        rz = wum.rotmat_from_euler(0, 0, rot_step)
+        bunny.rotmat = rz @ bunny.rotmat  # world Z
+        moved = True
+    if base.input_manager.is_key_pressed(key.E):
+        rz = wum.rotmat_from_euler(0, 0, -rot_step)
+        bunny.rotmat = rz @ bunny.rotmat  # world Z
+        moved = True
+
+    if moved:
+        bunny.pos = pos
+        tf_bunny[:] = wum.tf_from_pos_rotmat(bunny.pos, bunny.rotmat)
+        need_replan = True
+
+
+def clear_drawn():
+    for obj in drawn_nodes.values():
+        obj.alpha = 0.0
+
+
+def tick(dt):
+    global path, state, current_target, cursor, goal_qs, aux_qs, need_replan
+
+    move_bunny_once()
+
+    if need_replan:
+        goal_qs = None
+        aux_qs = None
+        clear_drawn()
+        MAX_DRAW = 10
+        count = 0
+        for i, g in enumerate(grasps):
+            jaw_width = g.provenance["jaw_width"]
+            pre_pose_world = tf_bunny @ g.pre_pose
+            pre_rot = pre_pose_world[:3, :3]
+            pre_pos = pre_pose_world[:3, 3]
+            qs_list = robot.ik(pre_pos, pre_rot, tcp=g.make_tcp(gripper))
+            if not qs_list:
+                continue
+            qs = qs_list[0]
+            mjc.set_mecba_qpos(gripper, (jaw_width / 2, jaw_width / 2))
+            pln_ctx.clear_cache()
+            if not pln_ctx.is_state_valid(qs):
+                continue
+            if i in drawn_nodes:
+                tmp = drawn_nodes[i]
+            else:
+                tmp = robot.clone()
+                tmp.add_to_scene(base.scene)
+                drawn_nodes[i] = tmp
+
+            tmp.rgba = (0.0, 1.0, 0.0, 0.1)
+            tmp.fk(qs=qs)
+            goal_qs = qs
+            aux_qs = (jaw_width / 2, jaw_width / 2)
+
+            count += 1
+            if count >= MAX_DRAW:
+                break
+
+        if goal_qs is None:
+            path = None
+            return
+
+        current_target = goal_qs
+        path = None
+        cursor = 0
+        need_replan = False
+
+    if path is None:
+        mjc.set_mecba_qpos(gripper, aux_qs)
+        pln_ctx.clear_cache()
+        path = planner.solve(start=state, goal=current_target)
+        if not path:
+            return
+        gripper.fk(qs=aux_qs)
+
+    next_idx = min(cursor + 1, len(path) - 1)
+    state = path[next_idx]
+    cursor = next_idx
+    robot.fk(qs=state)
+
+    if pln_ctx.states_equal(state, current_target, tol=5e-3):
+        if np.allclose(current_target, goal_qs):
+            current_target = start_qs
+        else:
+            current_target = goal_qs
+        path = None
+        cursor = 0
+
+
+base.schedule_interval(tick, interval=0.05)
+base.run()

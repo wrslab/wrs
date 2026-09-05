@@ -1,0 +1,314 @@
+"""CPU triangle-mesh collision detection (numpy/SIMD). create_detector +
+build_batch build a reusable batch; CPUDetector.detect_collision[_batch]
+runs it. Helpers: cols_to_vffns/vfs/tris, compute_aabb, point_in_tri_batch.
+
+Prefer this (or the GPU backend gpu_simd_batch) over fcl / trimesh.collision."""
+import numpy as np
+import wrs.collider.collision_batch as wccb
+
+
+class CPUDetector():
+    def __init__(self, eps=1e-9, max_points=200):
+        self.eps = eps
+        self.max_points = max_points
+
+    def detect_collision(self, vs_a, fs_a, tf_a,
+                         vs_b, fs_b, tf_b):
+        """
+        detect collision between two sets of triangles using CPU
+        """
+        # Transform
+        vs_a_tfed = (vs_a @ tf_a[:3, :3].T) + tf_a[:3, 3]
+        vs_b_tfed = (vs_b @ tf_b[:3, :3].T) + tf_b[:3, 3]
+        tris_a = vs_a_tfed[fs_a]
+        tris_b = vs_b_tfed[fs_b]
+        # Compute AABBs and check for overlap
+        min_a = tris_a.min(axis=(0, 1))
+        max_a = tris_a.max(axis=(0, 1))
+        min_b = tris_b.min(axis=(0, 1))
+        max_b = tris_b.max(axis=(0, 1))
+        if not aabb_intersect(min_a, max_a, min_b, max_b):
+            return None
+        tri_min_a = tris_a.min(axis=1)
+        tri_max_a = tris_a.max(axis=1)
+        tri_min_b = tris_b.min(axis=1)
+        tri_max_b = tris_b.max(axis=1)
+        overlap_mask = ((tri_min_a[:, None, :] <= tri_max_b[None, :, :]) &
+                        (tri_max_a[:, None, :] >= tri_min_b[None, :, :])).all(axis=-1)
+        pair_indices = np.argwhere(overlap_mask)
+        if len(pair_indices) == 0:
+            return None
+        # Detailed triangle-triangle intersection test
+        tris_a_pairs = tris_a[pair_indices[:, 0]]
+        tris_b_pairs = tris_b[pair_indices[:, 1]]
+        result = self._tripair_planeprojection_filter(
+            tris_a_pairs, tris_b_pairs)
+        if result is None:
+            return None
+        tris_pairs = result
+        fine_result = self._tripair_fine_filter(
+            tris_pairs[0], tris_pairs[1])
+        if fine_result is None:
+            return None
+        else:
+            return fine_result
+
+    def detect_collision_batch(self, batch):
+        if batch is None or batch.pairs is None or len(batch.pairs) == 0:
+            return None
+        # update transforms
+        batch.update_transforms()
+        # whole-body AABB
+        wd_min, wd_max = wccb.compute_wd_aabb_batch(
+            batch.aabb_mins, batch.aabb_maxs, batch.tfs)
+        ia = batch.pairs[:, 0]
+        ib = batch.pairs[:, 1]
+        overlap = (wd_min[ia] <= wd_max[ib]).all(axis=1) & \
+                  (wd_max[ia] >= wd_min[ib]).all(axis=1)
+        cand = np.where(overlap)[0]
+        if cand.size == 0:
+            return None
+        points_out = []
+        pair_ids_out = []
+        desc = batch.geom_descs
+        for id in cand:
+            i, j = batch.pairs[id]
+            v_off_a, v_cnt_a, f_off_a, f_cnt_a = desc[i]
+            v_off_b, v_cnt_b, f_off_b, f_cnt_b = desc[j]
+            if f_cnt_a == 0 or f_cnt_b == 0:
+                continue
+            vs_a = batch.vss[v_off_a:v_off_a + v_cnt_a]
+            fs_a = batch.fss[f_off_a:f_off_a + f_cnt_a] - v_off_a
+            tf_a = batch.tfs[i]
+            vs_b = batch.vss[v_off_b:v_off_b + v_cnt_b]
+            fs_b = batch.fss[f_off_b:f_off_b + f_cnt_b] - v_off_b
+            tf_b = batch.tfs[j]
+            pts = self.detect_collision(
+                vs_a, fs_a, tf_a, vs_b, fs_b, tf_b)
+            if pts is None:
+                continue
+            for p in pts:
+                points_out.append(p)
+                pair_ids_out.append(id)
+                if len(points_out) >= self.max_points:
+                    break
+            if len(points_out) >= self.max_points:
+                break
+        if not points_out:
+            return None
+        return (np.asarray(points_out, np.float32),
+                np.asarray(pair_ids_out, np.uint32))
+
+    def _tripair_planeprojection_filter(self, tris_a, tris_b, eps=1e-8):
+        """
+        Find first intersecting triangle pair.
+        :param tris_a, tris_b: (N,3,3)
+        :return: (hit_found, (ia, ib)) or (False, None)
+        """
+        normals_a, offsets_a = compute_triangle_planes(tris_a)
+        normals_b, offsets_b = compute_triangle_planes(tris_b)
+        # NORMALIZE the plane normals. compute_triangle_planes returns the raw
+        # cross product (magnitude = 2*area), so for small triangles |n| is tiny
+        # -- then |nA x nB| (= |nA||nB|sin th) underflows the coplanarity eps and
+        # genuinely-crossing small triangles get mis-rejected as coplanar, and
+        # the point-to-plane distances are scale-dependent. Unit normals make eps
+        # a true distance / a true sin(angle).
+        na_norm = np.linalg.norm(normals_a, axis=1, keepdims=True) + self.eps
+        nb_norm = np.linalg.norm(normals_b, axis=1, keepdims=True) + self.eps
+        normals_a = normals_a / na_norm
+        normals_b = normals_b / nb_norm
+        offsets_a = offsets_a / na_norm[:, 0]
+        offsets_b = offsets_b / nb_norm[:, 0]
+        dist_to_plane_a = (np.einsum("nij,nj->ni", tris_b, normals_a) +
+                           offsets_a[:, None])
+        dist_to_plane_b = (np.einsum("nij,nj->ni", tris_a, normals_b) +
+                           offsets_b[:, None])
+        separated_by_a = ((dist_to_plane_a > self.eps).all(axis=1) |
+                          (dist_to_plane_a < -self.eps).all(axis=1))
+        separated_by_b = ((dist_to_plane_b > self.eps).all(axis=1) |
+                          (dist_to_plane_b < -self.eps).all(axis=1))
+        candidate_mask = ~(separated_by_a | separated_by_b)
+        if not np.any(candidate_mask):
+            return None
+        idx = np.where(candidate_mask)[0]
+        tris_a = tris_a[idx]
+        tris_b = tris_b[idx]
+        normals_a = normals_a[idx]
+        normals_b = normals_b[idx]
+        intersection_dirs = np.cross(normals_a, normals_b)
+        dir_norms = np.linalg.norm(intersection_dirs, axis=1)
+        non_coplanar = dir_norms > eps
+        proj_a = np.einsum("nij,nj->ni", tris_a, intersection_dirs)
+        proj_b = np.einsum("nij,nj->ni", tris_b, intersection_dirs)
+        min_a = proj_a.min(axis=1)
+        max_a = proj_a.max(axis=1)
+        min_b = proj_b.min(axis=1)
+        max_b = proj_b.max(axis=1)
+        interval_overlap = (min_a <= max_b) & (max_a >= min_b)
+        hit_local = interval_overlap & non_coplanar
+        if not np.any(hit_local):
+            return None
+        tris_a_hit = tris_a[hit_local]
+        tris_b_hit = tris_b[hit_local]
+        return (tris_a_hit, tris_b_hit)
+
+    def _tripair_fine_filter(self, tris_a, tris_b):
+        nA = np.cross(tris_a[:, 1] - tris_a[:, 0], tris_a[:, 2] - tris_a[:, 0])
+        nB = np.cross(tris_b[:, 1] - tris_b[:, 0], tris_b[:, 2] - tris_b[:, 0])
+        nA /= (np.linalg.norm(nA, axis=1, keepdims=True) + self.eps)
+        nB /= (np.linalg.norm(nB, axis=1, keepdims=True) + self.eps)
+        dA = -np.einsum("ij,ij->i", nA, tris_a[:, 0])
+        dB = -np.einsum("ij,ij->i", nB, tris_b[:, 0])
+        dir_vec = np.cross(nA, nB)
+        dir_norm = np.linalg.norm(dir_vec, axis=1)
+        valid = dir_norm >= 1e-4
+        p0 = np.cross((dB[:, None] * nA - dA[:, None] * nB),
+                      dir_vec) / (dir_norm[:, None] ** 2 + self.eps)
+        dir_vec = dir_vec / (dir_norm[:, None] + self.eps)
+        # Correct Moller intervals: each triangle meets the planes' intersection
+        # line L only along the CHORD between where its two crossing edges pierce
+        # the other plane -- not the span of its vertex projections. Find those
+        # crossings from the per-vertex signed distances to the other plane and
+        # parameterise them along dir_vec; the triangles intersect iff their
+        # chords overlap on L.
+        dist_a = np.einsum("nj,nkj->nk", nB, tris_a) + dB[:, None]
+        dist_b = np.einsum("nj,nkj->nk", nA, tris_b) + dA[:, None]
+        proj_a = np.einsum("nj,nkj->nk", dir_vec, tris_a)
+        proj_b = np.einsum("nj,nkj->nk", dir_vec, tris_b)
+
+        def _chord(dist, proj):
+            lo = np.full(dist.shape[0], np.inf, dtype=dist.dtype)
+            hi = np.full(dist.shape[0], -np.inf, dtype=dist.dtype)
+            cnt = np.zeros(dist.shape[0], dtype=np.int64)
+            for i, j in ((0, 1), (1, 2), (2, 0)):
+                di, dj = dist[:, i], dist[:, j]
+                denom = di - dj
+                crosses = (di * dj <= 0.0) & (np.abs(denom) > self.eps)
+                w = di / np.where(crosses, denom, 1.0)   # in [0,1] when crossing
+                t = proj[:, i] + (proj[:, j] - proj[:, i]) * w
+                lo = np.where(crosses, np.minimum(lo, t), lo)
+                hi = np.where(crosses, np.maximum(hi, t), hi)
+                cnt += crosses
+            return lo, hi, cnt >= 2
+
+        a0, a1, va = _chord(dist_a, proj_a)
+        b0, b1, vb = _chord(dist_b, proj_b)
+        valid &= va & vb
+        ov0 = np.maximum(a0, b0)
+        ov1 = np.minimum(a1, b1)
+        valid &= ov0 < ov1
+        # invalid rows carry +-inf chord bounds; keep their arithmetic finite
+        # (they are dropped by the mask below) to avoid inf-inf NaN warnings.
+        mid = 0.5 * (np.where(np.isfinite(ov0), ov0, 0.0) +
+                     np.where(np.isfinite(ov1), ov1, 0.0))
+        points = p0 + dir_vec * mid[:, None]
+        if np.any(valid):
+            return points[valid]
+        return None
+
+
+def create_detector(eps=1e-9, max_points=200):
+    return CPUDetector(eps=eps, max_points=max_points)
+
+
+def build_batch(items, pairs):
+    return wccb.CollisionBatch(items, pairs)
+
+
+def cols_to_vfs(cols):
+    if not cols:
+        return None
+    vs_list = []
+    fs_list = []
+    offset = 0
+    for col in cols:
+        geom = col.geom
+        tf = col.loc_tf
+        rot = tf[:3, :3]
+        pos = tf[:3, 3]
+        vs = (rot @ geom.vs.T).T + pos
+        fs = geom.fs + offset
+        vs_list.append(vs)
+        fs_list.append(fs)
+        offset += vs.shape[0]
+    vss = np.vstack(vs_list).astype(
+        np.float32, copy=False)
+    fss = np.vstack(fs_list).astype(
+        np.int32, copy=False)
+    return vss, fss
+
+
+def cols_to_vffns(cols):
+    if not cols:
+        return None
+    vs_list = []
+    fs_list = []
+    fns_list = []
+    offset = 0
+    for col in cols:
+        geom = col.geom
+        tf = col.loc_tf
+        rot = tf[:3, :3]
+        pos = tf[:3, 3]
+        vs = (rot @ geom.vs.T).T + pos
+        fs = geom.fs + offset
+        fns = (rot @ geom.fns.T).T
+        vs_list.append(vs)
+        fs_list.append(fs)
+        fns_list.append(fns)
+        offset += vs.shape[0]
+    vss = np.vstack(vs_list).astype(
+        np.float32, copy=False)
+    fss = np.vstack(fs_list).astype(
+        np.int32, copy=False)
+    fnss = np.vstack(fns_list).astype(
+        np.float32, copy=False)
+    return vss, fss, fnss
+
+
+def cols_to_tris(cols):
+    out = cols_to_vfs(cols)
+    if out is None:
+        return None
+    vs, fs = out
+    return vs[fs]
+
+
+def compute_aabb(tris):
+    mins = tris.min(axis=(0, 1))
+    maxs = tris.max(axis=(0, 1))
+    return mins, maxs
+
+
+def aabb_intersect(min_a, max_a, min_b, max_b):
+    return np.all(min_a <= max_b) and np.all(max_a >= min_b)
+
+
+def compute_triangle_planes(tris):
+    """
+    plane through origin: n dot x = 0
+    plane through point p: n dot x + d = 0, d = -n dot p
+    :param tris: (N,3,3)
+    :return: normals: (N,3), offsets: (N,)
+    """
+    edge1 = tris[:, 1] - tris[:, 0]
+    edge2 = tris[:, 2] - tris[:, 0]
+    normals = np.cross(edge1, edge2)
+    offsets = -np.einsum(  # -n dot p
+        "ij,ij->i", normals, tris[:, 0])
+    return normals, offsets
+
+
+def point_in_tri_batch(pts, tris, eps=1e-9):
+    v0 = tris[:, 2] - tris[:, 0]
+    v1 = tris[:, 1] - tris[:, 0]
+    v2 = pts - tris[:, 0]
+    dot00 = np.einsum("ij,ij->i", v0, v0)
+    dot01 = np.einsum("ij,ij->i", v0, v1)
+    dot02 = np.einsum("ij,ij->i", v0, v2)
+    dot11 = np.einsum("ij,ij->i", v1, v1)
+    dot12 = np.einsum("ij,ij->i", v1, v2)
+    inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01 + eps)
+    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
+    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
+    return (u >= -eps) & (v >= -eps) & (u + v <= 1.0 + eps)

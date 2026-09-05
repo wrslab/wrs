@@ -1,0 +1,86 @@
+import numpy as np
+import wrs.utils.constant as wuc
+import wrs.geom.geometry as wgg
+import wrs.scene.render_model as wsrm
+
+
+def gen_mesh_rmodel(vs, fs, rgb, alpha=1.0):
+    geom = wgg.gen_geom_from_raw(vs, fs)
+    return wsrm.RenderModel(geom=geom, rgb=rgb, alpha=alpha)
+
+
+def gen_pcd_rmodel(vs, vrgbs, alpha=1.0):
+    geom = wgg.gen_geom_from_raw(vs)
+    return wsrm.RenderModel(geom=geom, vrgbs=vrgbs, alpha=alpha)
+
+
+def gen_cylinder_rmodel(length=0.1, radius=0.05, n_segs=8,
+                        rotmat=None, pos=None,
+                        rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    """Gen cylinder render model from (0,0,0) to (0,0,length)."""
+    geom = wgg.gen_cylinder_geom(length, radius, n_segs)   # centered on origin
+    # gen_cylinder_geom is centered now; lift it by half the length so this
+    # model keeps its documented (0,0,0)->(0,0,length) span.
+    lift = np.array([0.0, 0.0, length / 2.0], dtype=np.float32)
+    if rotmat is not None:
+        lift = rotmat @ lift
+    pos = lift if pos is None else np.asarray(pos, dtype=np.float32) + lift
+    return wsrm.RenderModel(
+        geom=geom, rotmat=rotmat, pos=pos, rgb=rgb, alpha=alpha)
+
+
+def gen_cone_rmodel(length=0.1, radius=0.05, n_segs=8,
+                    rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    """Gen cone render model from (0,0,0) to (0,0,length)."""
+    geometry = wgg.gen_cone_geom(length, radius, n_segs)
+    return wsrm.RenderModel(
+        geom=geometry, rgb=rgb, alpha=alpha)
+
+
+def gen_sphere_rmodel(radius=0.05, n_segs=8,
+                      rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    """Gen sphere render model at (0,0,0)."""
+    geometry = wgg.gen_sphere_geom(radius, n_segs)
+    return wsrm.RenderModel(
+        geom=geometry, rgb=rgb, alpha=alpha)
+
+
+def gen_icosphere_rmodel(radius=0.05, n_subs=2,
+                         rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    """Gen icosphere render model at (0,0,0)."""
+    geometry = wgg.gen_icosphere_geom(radius, n_subs)
+    return wsrm.RenderModel(
+        geom=geometry, rgb=rgb, alpha=alpha)
+
+
+def gen_box_rmodel(xyz_lengths=(0.1, 0.1, 0.1),
+                   rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    """Gen box render model centered at (0,0,0)."""
+    geometry = wgg.gen_box_geom(xyz_lengths)
+    return wsrm.RenderModel(
+        geom=geometry, rgb=rgb, alpha=alpha)
+
+
+def gen_frustrum_rmodel(height=0.05,
+                        bottom_length=0.05,
+                        top_length=0.03,
+                        rotmat=None, pos=None,
+                        rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    geometry = wgg.gen_frustrum_geom(
+        height=height,
+        bottom_length=bottom_length,
+        top_length=top_length)
+    return wsrm.RenderModel(
+        geom=geometry, rotmat=rotmat, pos=pos, rgb=rgb, alpha=alpha)
+
+
+def gen_arrow_rmodel(length, shaft_radius, head_length, head_radius,
+                     n_segs, rotmat=None, pos=None,
+                     rgb=wuc.BasicColor.DEFAULT, alpha=1.0):
+    """Gen arrow render model from (0,0,0) to (0,0,length)."""
+    geometry = wgg.gen_arrow_geom(
+        length, shaft_radius, head_length,
+        head_radius, n_segs)
+    return wsrm.RenderModel(
+        geom=geometry, rotmat=rotmat,
+        pos=pos, rgb=rgb, alpha=alpha)

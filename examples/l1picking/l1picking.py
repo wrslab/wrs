@@ -1,0 +1,312 @@
+"""L1O6 left-arm pick of an upright cylinder standing on a table, using grasps
+pre-planned + saved by o6planning.py.
+
+Pipeline:
+    load JSON grasps (O6, ``PRIMITIVE`` grasp, cylinder-LOCAL frame)
+      -> transform onto the cylinder where it stands on the table
+      -> keep the ones with a collision-free, reachable IK (hand clears the
+         table; the cylinder itself is the target so hand-vs-cylinder is allowed)
+      -> motion-plan the FIRST feasible grasp: home -> pre-grasp -> grasp -> lift
+      -> animate.
+
+Table: tabletop + 4 legs, origin at the bottom-centre, placed at x=0.3,y=0,z=0;
+tabletop top at z=0.9, length(y)=1.2, width(x)=0.6. Cylinder (dia 0.05, h 0.3)
+stands upright on the tabletop.
+
+Keys:  F = step one frame   G = play/pause (continuous)
+       R = replay           N = next candidate grasp (re-plans)
+Run headless validation (no window):  ONE_HEADLESS=1
+"""
+import os
+import sys
+
+import numpy as np
+
+_THIS = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_THIS))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+import wrs.utils.constant as wuc                              # noqa: E402
+import wrs.scene.scene_object as wsso                         # noqa: E402
+import wrs.scene.scene_object_primitive as wssop              # noqa: E402
+import wrs.collider.mj_collider as wcm                        # noqa: E402
+import wrs.motion.core.planning_context as wmppc     # noqa: E402
+import wrs.motion.probabilistic.rrt as wmpr                   # noqa: E402
+import wrs.motion.primitives.approach_depart as wmpad            # noqa: E402
+import wrs.robots.humanoids.linx.l1.l1 as l1                  # noqa: E402
+from wrs.grasp.serialize import load_grasps, transform_grasps  # noqa: E402
+
+GRASPS_JSON = os.path.join(_THIS, "o6_cylinder_grasps.json")
+CHAIN = 'left_arm'      # left arm only (6-DOF, analytic S456X12); waist frozen
+PRIMITIVE = 'tripod'     # grasp primitive -- MUST match the one o6planning saved
+                        # the JSON with (drives the jaw tcp AND the closing)
+
+# Table: origin at bottom-centre, at world (0.3, 0, 0). Tabletop top z=0.9.
+TABLE_ORIGIN = np.array([0.3, 0.0, 0.0], dtype=np.float32)
+TABLE_LEN_Y = 1.2            # length along y
+TABLE_WID_X = 0.6           # width along x
+TABLE_TOP_Z = 0.9
+TOP_THICK = 0.04
+LEG = 0.05                   # square leg cross-section
+TABLE_RGB = (0.55, 0.42, 0.30)
+
+# Cylinder mesh standing on the tabletop -- the SAME mesh o6planning planned the
+# grasps on, so the saved local grasps map straight on via cyl.tf. Its base is
+# at z=0 in its own frame, so cyl.pos places the base on the tabletop.
+CYL_STL = os.path.join(_THIS, "cylinder.stl")
+CYL_POS = np.array([0.22, 0.3, TABLE_TOP_Z], dtype=np.float32)
+
+UP = np.array([0.0, 0.0, 0.15], dtype=np.float32)   # lift after grasp
+
+
+# ----------------------------------------------------------------------------
+def build_table():
+    """Tabletop + 4 legs as separate axis-aligned boxes (origin = bottom centre
+    at TABLE_ORIGIN). Returns the list of parts."""
+    ox, oy, _ = TABLE_ORIGIN
+    top_cz = TABLE_TOP_Z - TOP_THICK / 2
+    parts = [wssop.box(xyz_lengths=(TABLE_WID_X, TABLE_LEN_Y, TOP_THICK),
+                       pos=(ox, oy, top_cz), rgb=TABLE_RGB,
+                       collision_type=wuc.CollisionType.AABB)]
+    leg_h = TABLE_TOP_Z - TOP_THICK
+    inset_x = TABLE_WID_X / 2 - LEG / 2
+    inset_y = TABLE_LEN_Y / 2 - LEG / 2
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            parts.append(wssop.box(
+                xyz_lengths=(LEG, LEG, leg_h),
+                pos=(ox + sx * inset_x, oy + sy * inset_y, leg_h / 2),
+                rgb=TABLE_RGB, collision_type=wuc.CollisionType.AABB))
+    return parts
+
+
+def build_scene():
+    robot = l1.L1O6()
+    table = build_table()
+    # File-backed mesh, so the MuJoCo collider can use MESH collision directly
+    # (a procedural cylinder has no file and previously needed a CAPSULE fallback).
+    cyl = wsso.SceneObject.from_file(
+        CYL_STL, collision_type=wuc.CollisionType.MESH,
+        is_floating=True, rgb=(0.6, 0.7, 0.5))
+    cyl.pos = CYL_POS.copy()
+    ground = wssop.plane(pos=(0, 0, 0.0))
+    return robot, table, cyl, ground
+
+
+def make_collider(robot, table, cyl, ground):
+    """Collider for motion planning: robot vs table + cylinder + ground + self.
+    The cylinder IS an obstacle so the free-space approach (home -> pre-grasp)
+    and the pre-grasp pose avoid it; the grasp/lift keyframes are checked with
+    ``collision_free=False`` (and pre->grasp is a straight interpolation), so the
+    intended hand-vs-cylinder contact at the grasp is not flagged.
+
+    The scene cylinder is ``is_floating=True`` (it gets grasped/lifted); a free body
+    is not pinned at its pose in the collider and would float to the origin and
+    spuriously collide, so the obstacle is a FIXED clone at the cylinder's pose."""
+    cyl_obstacle = cyl.clone()
+    cyl_obstacle.is_floating = False
+    # pinned clone used purely as a static obstacle here: declare it STATIC so it
+    # does not spuriously contact the table/ground it rests on (STATIC-vs-STATIC
+    # is off). The role no longer follows is_floating, so it is declared explicitly.
+    cyl_obstacle.collision_group = wuc.CollisionGroup.STATIC
+    mjc = wcm.MJCollider()
+    for e in (robot, *table, cyl_obstacle, ground):
+        mjc.append(e)
+    mjc.actors = [robot]
+    mjc.compile(margin=0.0, auto_acm=True)
+    return mjc
+
+
+def chain_planning_context(robot, mjc, chain_name):
+    """PlanningContext over the full qs with every joint NOT on ``chain_name``
+    frozen at home -> the planner only explores that chain."""
+    return wmppc.PlanningContext(
+        collider=mjc, joint_limits=robot.chain_joint_limits(chain_name))
+
+
+def load_world_grasps(cyl):
+    """Load the cylinder-local grasps and map them onto the cylinder's world
+    pose. Returns a list of world-frame :class:`Grasp`."""
+    return transform_grasps(load_grasps(GRASPS_JSON), cyl.tf)
+
+
+def build_motion(robot, ctx, planner, jaw, grasp):
+    """Pick motion for one :class:`Grasp`:
+    home -> pre-grasp (planned) -> grasp (approach) -> lift. Returns
+    (traj, grasp_idx, amount) or None if a keyframe is unreachable/colliding."""
+    pose, pre_pose = grasp.pose, grasp.pre_pose
+    jw = grasp.provenance["jaw_width"]
+    rot = pose[:3, :3]
+    g = pose[:3, 3]
+    # per-grasp power-center tcp on the mounted hand (the calibrated grasp
+    # centre for this closure) -- IK puts the pads where they will close.
+    # Use the FULL grasp-center loc_tf (position AND orientation): jaw's
+    # grasp frame is rotated relative to the hand base, and grip_at applies
+    # that rotation. Feeding IK a position-only (identity-rotation) tcp would
+    # reach the right point with the wrong wrist twist -> hand hits the object.
+    center_tcp = grasp.make_tcp(robot.left_hand)
+    home = robot.qs.astype(np.float64).copy()
+    # RRT home -> pre-grasp, then a straight CARTESIAN descent into the grasp
+    # (the pre pose is loaded with the grasp, so pass it explicitly). The hand
+    # comes straight down the approach axis instead of bowing sideways the way a
+    # joint-space line would. check_descent=False: the target cylinder is a
+    # collision obstacle here, so the intended hand-vs-cylinder contact at the
+    # grasp must NOT gate the descent (mirrors the old collision_free=False).
+    # ``center_tcp`` is this grasp's center (jaw-width dependent), passed per call
+    # to the free approach/depart functions (custom ``ctx`` -> no Arm facade).
+    approach = wmpad.gen_approach(
+        robot, ctx, planner, g, rot, tcp=center_tcp, start_qs=home, chain=CHAIN,
+        pre_pos=pre_pose[:3, 3], pre_rotmat=pre_pose[:3, :3], granularity=0.01,
+        use_rrt=True, check_descent=False, max_iters=4000)
+    if approach is None:
+        return None
+    grasp_idx = len(approach) - 1               # hand closes here (at the grasp)
+    grasp_q = approach.robot_qpos_list[-1]
+    # straight cartesian lift (carrying); contact still intended -> ungated.
+    lift = wmpad.gen_depart(
+        robot, ctx, planner, g, rot, tcp=center_tcp, start_qs=grasp_q,
+        chain=CHAIN, depart_direction=UP,
+        depart_distance=float(np.linalg.norm(UP)),
+        granularity=0.01, check_retreat=False)
+    if lift is None:
+        return None
+    traj = (approach + lift).robot_qpos_list
+    amount = float(jaw._amount_for(jw))         # jw -> power closure amount
+    return traj, grasp_idx, amount
+
+
+def first_reachable(robot, ctx, planner, jaw, grasps, start=0):
+    """Build the motion for the first feasible grasp at/after ``start`` (wrap).
+    Returns (grasp_index, motion) or (None, None)."""
+    for k in range(len(grasps)):
+        idx = (start + k) % len(grasps)
+        motion = build_motion(robot, ctx, planner, jaw, grasps[idx])
+        if motion is not None:
+            return idx, motion
+    return None, None
+
+
+# ----------------------------------------------------------------------------
+def main():
+    headless = bool(os.environ.get("ONE_HEADLESS"))
+    if headless:
+        np.random.seed(0)
+    robot, table, cyl, ground = build_scene()
+    mjc = make_collider(robot, table, cyl, ground)   # cylinder is an obstacle
+                                                     # until the grasp itself
+    ctx = chain_planning_context(robot, mjc, CHAIN)
+    planner = wmpr.RRTConnectPlanner(pln_ctx=ctx, extend_step_size=np.pi / 36,
+                                     goal_bias=0.3)
+    jaw = robot.left_hand.as_jaw(PRIMITIVE)
+    grasps = load_world_grasps(cyl)
+    print(f"loaded {len(grasps)} grasps from {os.path.basename(GRASPS_JSON)}")
+
+    gi, motion = first_reachable(robot, ctx, planner, jaw, grasps)
+    if motion is None:
+        raise RuntimeError("no loaded grasp is reachable + collision-free")
+    traj, grasp_idx, _amount = motion
+    print(f"first feasible grasp {gi} (score {grasps[gi].score:.2f}): "
+          f"{len(traj)} waypoints (grasp@{grasp_idx})")
+
+    if headless:
+        # count how many grasps survive the reachable + collision-free filter
+        n_ok = sum(build_motion(robot, ctx, planner, jaw, g) is not None
+                   for g in grasps[:20])
+        print(f"headless OK: {n_ok}/20 sampled grasps feasible; "
+              f"first feasible = grasp {gi}")
+        return
+
+    import builtins
+    import wrs.viewer.key as key
+    import wrs.viewer.world as wvw
+
+    base = wvw.World(cam_pos=(1.6, 1.0, 1.7), cam_lookat_pos=(0.35, 0.1, 0.95))
+    builtins.base = base
+    wssop.frame().add_to_scene(base.scene)
+    for e in (robot, *table, cyl, ground):
+        e.add_to_scene(base.scene)
+
+    # # Draw every loaded grasp as translucent ghost jaws: GREEN at the grasp
+    # # ``pose`` (closed to the grasp width), YELLOW at the ``pre`` approach pose
+    # # (jaw open). All at alpha 0.3 so the picking animation stays readable.
+    # jaw_open = float(jaw.jaw_range[1])
+    # for grasp in grasps:
+    #     pose, pre = grasp.pose, grasp.pre_pose
+    #     jw = grasp.provenance["jaw_width"]
+    #     ghost_pose = robot.left_hand.as_jaw('power')
+    #     ghost_pose.grip_at(pose[:3, 3], pose[:3, :3], jw)
+    #     ghost_pose.rgb = (0.20, 0.85, 0.25)
+    #     ghost_pose.alpha = 0.3
+    #     ghost_pose.add_to_scene(base.scene)
+    #     ghost_pre = robot.left_hand.as_jaw('power')
+    #     ghost_pre.grip_at(pre[:3, 3], pre[:3, :3], jaw_open)
+    #     ghost_pre.rgb = (0.95, 0.85, 0.15)
+    #     ghost_pre.alpha = 0.3
+    #     ghost_pre.add_to_scene(base.scene)
+
+    cyl_home = (cyl.pos.copy(), cyl.rotmat.copy())
+    print("F: step frame   G: play/pause   R: replay   N: next grasp")
+
+    state = {"gi": gi, "motion": motion, "i": 0, "held": False, "playing": False}
+
+    def reset_play():
+        if state["held"]:
+            robot.left_hand.open_hand()
+            robot.left_hand.release(cyl)
+            state["held"] = False
+        robot.left_hand.open_hand()
+        cyl.pos, cyl.rotmat = cyl_home[0].copy(), cyl_home[1].copy()
+        robot.fk(qs=state["motion"][0][0])
+        state["i"] = 0
+        base.scene.dirty = True
+
+    def select_next():
+        reset_play()
+        gi2, motion2 = first_reachable(robot, ctx, planner, jaw, grasps,
+                                       start=state["gi"] + 1)
+        if motion2 is None:
+            print("no other feasible grasp")
+            return
+        state["gi"], state["motion"] = gi2, motion2
+        print(f"grasp {gi2} (score {grasps[gi2].score:.2f}): "
+              f"{len(motion2[0])} waypoints")
+        reset_play()
+
+    def step_one():
+        traj_i, grasp_idx_i, amount = state["motion"]
+        i = state["i"]
+        if i >= len(traj_i):
+            state["playing"] = False
+            return
+        robot.fk(qs=traj_i[i])
+        if i == grasp_idx_i and not state["held"]:
+            robot.left_hand.grip(PRIMITIVE, amount)
+            robot.left_hand.hold(cyl)
+            state["held"] = True
+        state["i"] += 1
+        base.scene.dirty = True
+
+    reset_play()
+
+    def tick(dt):
+        if base.input_manager.is_key_pressed_edge(key.R):
+            reset_play()
+            return
+        if base.input_manager.is_key_pressed_edge(key.N):
+            select_next()
+            return
+        if base.input_manager.is_key_pressed_edge(key.G):
+            state["playing"] = not state["playing"]
+        if base.input_manager.is_key_pressed_edge(key.F):
+            state["playing"] = False
+            step_one()
+        if state["playing"]:
+            step_one()
+
+    base.schedule_interval(tick, interval=0.03)
+    base.run()
+
+
+if __name__ == "__main__":
+    main()
