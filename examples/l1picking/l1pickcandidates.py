@@ -67,7 +67,7 @@ def main(primitive='pinch'):
     print("N: next candidate")
 
     def tick(dt):
-        if base.input_manager.is_key_pressed_edge(key.N):
+        if base.is_key_pressed_edge(key.N):
             state["i"] = (state["i"] + 1) % len(grasps)
             show(state["i"])
 

@@ -370,14 +370,13 @@ def main():
     reset_play()
 
     def tick(dt):
-        im = base.input_manager
-        if im.is_key_pressed_edge(key.R):
+        if base.is_key_pressed_edge(key.R):
             reset_play(); return
-        if im.is_key_pressed_edge(key.N):
+        if base.is_key_pressed_edge(key.N):
             select_next(); return
-        if im.is_key_pressed_edge(key.G):
+        if base.is_key_pressed_edge(key.G):
             st["playing"] = not st["playing"]
-        if im.is_key_pressed_edge(key.F):
+        if base.is_key_pressed_edge(key.F):
             st["playing"] = False
             step_one()
         if st["playing"]:

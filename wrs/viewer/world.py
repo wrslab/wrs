@@ -1,94 +1,71 @@
-"""The window, the scene it shows, and the loop that drives them.
+"""The world a script builds its scene in, drawn by the browser page.
 
-A World owns a RenderCanvas rather than being one, so a script holds a plain
-object: ``base.scene`` to populate, ``base.camera`` to aim, and run /
-schedule_interval / schedule_once / schedule_interval_after / stop /
-stop_after / set_caption / event to drive it.  Timed callbacks are served by
-the small scheduler below, ticked once per frame.
+The page is the host: it owns the renderer and the camera and outlives the
+script.  A script builds its scene, publishes it to the hub, and exits; the
+page keeps the viewpoint you dragged to and picks up whatever the next run
+publishes.  Nothing here touches the GPU -- no adapter, no device, no
+pipelines -- so a rerun costs the import and the scene build, nothing more.
+
+    base = wvw.World(cam_pos=(.3, .3, .3))
+    ...
+    base.run()
+
+``run()`` starts the hub if nothing is listening yet, so there is no separate
+server to remember.  To keep one running by hand instead::
+
+    py -3.12 -m wrs.viewer.server
 """
+import asyncio
+import json
+import os
+import queue
+import socket
+import subprocess
+import sys
+import threading
 import time
-import wgpu
-from rendercanvas.auto import RenderCanvas, loop
+
+import websockets
 
 import wrs.scene.scene as wss
-import wrs.viewer.context as wvc
-import wrs.viewer.camera as wvcam
-import wrs.viewer.input_manager as wvim
-import wrs.viewer.render as wvr
+import wrs.viewer.key as wvk
+import wrs.viewer.protocol as wvp
+from wrs.viewer.server import DEFAULT_PORT
+from wrs.utils.scheduler import Scheduler
 
-SAMPLE_COUNT = 4
-
-
-class _Scheduler:
-    """Timed callbacks, called as ``fn(dt, *args, **kwargs)``.
-
-    A linear scan per frame: measured at 0.14 us for the handful of callbacks
-    a script actually schedules, against a 16.7 ms frame.  A sorted heap only
-    pays off past ~10 callbacks, which no example comes near.
-    """
-
-    def __init__(self):
-        self._items = []  # [fn, interval, next_t, last_t, args, kwargs, repeat]
-
-    def schedule_interval(self, fn, interval, *args, **kwargs):
-        now = time.perf_counter()
-        self._items.append(
-            [fn, interval, now + interval, now, args, kwargs, True])
-
-    def schedule_once(self, fn, delay, *args, **kwargs):
-        now = time.perf_counter()
-        self._items.append([fn, delay, now + delay, now, args, kwargs, False])
-
-    def unschedule(self, fn):
-        self._items = [it for it in self._items if it[0] is not fn]
-
-    def tick(self):
-        now = time.perf_counter()
-        due = [it for it in self._items if now >= it[2]]
-        for item in due:
-            fn, interval, _, last_t, args, kwargs, repeat = item
-            # the time that actually elapsed, so a callback integrating over
-            # dt keeps its rate when frames are slow
-            fn(now - last_t, *args, **kwargs)
-            item[3] = now
-            if repeat:
-                item[2] = now + interval
-            else:
-                # by identity: two items can compare equal on ==
-                self._items = [it for it in self._items if it is not item]
+_HUB_BOOT_TIMEOUT = 10.0
 
 
 class World:
+    """Same surface as the old native World, minus the window."""
 
     def __init__(self,
                  cam_pos=(.1, .1, .1),
                  cam_lookat_pos=(0, 0, 0),
-                 win_size=None,
-                 toggle_auto_cam_orbit=False):
-        win_w, win_h = win_size if win_size else _default_win_size()
-        self.canvas = RenderCanvas(size=(win_w, win_h), title='WRS World',
-                                   update_mode='continuous', max_fps=60)
-        self.device = wvc.get_device()
-        self.context = self.canvas.get_context('wgpu')
-        self.color_format = self.context.get_preferred_format(
-            wvc.get_adapter())
-        self.context.configure(device=self.device, format=self.color_format)
-        self.camera = wvcam.Camera(pos=cam_pos, look_at=cam_lookat_pos,
-                                    aspect=win_w / win_h)
-        self.render = wvr.Render(self.camera, self.color_format, SAMPLE_COUNT)
+                 toggle_auto_cam_orbit=False,
+                 host='127.0.0.1', port=DEFAULT_PORT, hz=30,
+                 tick_hz=60,
+                 auto_start_hub=True):
         self.scene = wss.Scene()
-        self.input_manager = wvim.InputManager(self, self.canvas)
-        self._scheduler = _Scheduler()
+        self.cam_pos = tuple(float(v) for v in cam_pos)
+        self.cam_lookat_pos = tuple(float(v) for v in cam_lookat_pos)
+        self.toggle_auto_cam_orbit = toggle_auto_cam_orbit
+        self.caption = None
+        self._scheduler = Scheduler()
         self._handlers = {}
-        self._msaa_tex = None
-        self._depth_tex = None
-        self._target_size = (0, 0)
+        self._tick_dt = 1.0 / float(tick_hz)
         self._closed = False
-        if toggle_auto_cam_orbit:
-            self.schedule_interval(self.auto_cam_orbit, interval=1 / 30.0)
-        self.canvas.add_event_handler(self._on_resize, 'resize')
-        self.canvas.add_event_handler(self._on_close, 'close')
-        self.canvas.request_draw(self._draw_frame)
+        self._host = host
+        self._port = int(port)
+        self._hz = float(hz)
+        self._auto_start_hub = auto_start_hub
+        self._publishing = False
+        # Page events land here from the publisher thread and are dispatched
+        # on the main one, in run() -- the thread a native on_key_press would
+        # have arrived on.
+        self._events = queue.SimpleQueue()
+        self.pressed_keys = set()
+        self._pending_presses = set()
 
     # ------------------------------------------------------------- public API
 
@@ -96,24 +73,14 @@ class World:
         self.scene = scene
 
     def set_caption(self, caption):
-        self.canvas.set_title(caption)
-
-    def auto_cam_orbit(self, dt, deg_per_sec=.5):
-        self.camera.orbit(angle_rad=deg_per_sec * dt * (3.14159265 / 180.0))
+        """Set the browser tab title; safe to call from a callback."""
+        self.caption = caption
 
     def schedule_interval(self, function, interval=.01, *args, **kwargs):
         self._scheduler.schedule_interval(function, interval, *args, **kwargs)
 
     def schedule_once(self, function, delay=.01, *args, **kwargs):
         self._scheduler.schedule_once(function, delay, *args, **kwargs)
-
-    def schedule_interval_after(self, function, delay, interval=.01,
-                                *args, **kwargs):
-        def _start_cb(dt):
-            self._scheduler.schedule_interval(
-                function, interval, *args, **kwargs)
-
-        self._scheduler.schedule_once(_start_cb, delay)
 
     def stop(self, function):
         self._scheduler.unschedule(function)
@@ -134,68 +101,185 @@ class World:
         if handler is not None:
             handler(*args)
 
+    def is_key_pressed(self, symbol):
+        """True for as long as the key is held."""
+        return symbol in self.pressed_keys
+
+    def is_key_pressed_edge(self, symbol):
+        """True once per press -- the caller consumes the edge.
+
+        The page drops auto-repeat, so holding a key yields exactly one edge
+        rather than a stream of them.
+        """
+        if symbol in self._pending_presses:
+            self._pending_presses.discard(symbol)
+            return True
+        return False
+
     def close(self):
-        self.canvas.close()
-
-    def run(self):
-        loop.run()
-
-    # ----------------------------------------------------------------- frames
-
-    def _on_close(self, event):
         self._closed = True
 
-    def _on_resize(self, event):
-        width = max(1, int(event['width']))
-        height = max(1, int(event['height']))
-        self.camera._rebuild_projmat(width, height)
+    def run(self):
+        """Publish the scene and tick scheduled callbacks until Ctrl-C.
 
-    def _ensure_targets(self, width, height):
-        if self._target_size == (width, height):
-            return
-        self._target_size = (width, height)
-        usage = wgpu.TextureUsage.RENDER_ATTACHMENT
-        self._msaa_tex = self.device.create_texture(
-            size=(width, height, 1), format=self.color_format,
-            sample_count=SAMPLE_COUNT, usage=usage)
-        self._depth_tex = self.device.create_texture(
-            size=(width, height, 1), format=wvr.DEPTH_FORMAT,
-            sample_count=SAMPLE_COUNT, usage=usage)
-
-    def _draw_frame(self):
-        # A draw can still be requested after close(), once the swapchain is
-        # already gone.
-        if self._closed or self.canvas.get_closed():
-            return
-        self._scheduler.tick()
+        The publisher thread samples ``self.scene`` on its own clock, so this
+        loop only advances the script's own callbacks and drains page events.
+        """
+        if not self._publishing:
+            self._ensure_hub()
+            threading.Thread(target=self._publish_forever, daemon=True).start()
+            self._publishing = True
         try:
-            target = self.context.get_current_texture()
-        except RuntimeError:
-            # The window went away between the draw request and here, so the
-            # swapchain is already unconfigured.
-            self._closed = True
+            while not self._closed:
+                self._drain_events()
+                self._scheduler.tick()
+                self.dispatch('on_draw')
+                time.sleep(self._tick_dt)
+        except KeyboardInterrupt:
+            pass
+
+    # ---------------------------------------------------------------- events
+
+    def _post_event(self, name, args):
+        """Queue an event from the publisher thread; run() drains it."""
+        self._events.put((name, args))
+
+    def _drain_events(self):
+        while True:
+            try:
+                name, args = self._events.get_nowait()
+            except queue.Empty:
+                return
+            if name == 'on_key_press':
+                self.pressed_keys.add(args[0])
+                self._pending_presses.add(args[0])
+            elif name == 'on_key_release':
+                self.pressed_keys.discard(args[0])
+            self.dispatch(name, *args)
+
+    # ------------------------------------------------------------------- hub
+
+    def _hub_is_up(self):
+        with socket.socket() as probe:
+            probe.settimeout(0.25)
+            return probe.connect_ex((self._host, self._port)) == 0
+
+    def _ensure_hub(self):
+        """Start the hub if the port is idle, and wait until it answers.
+
+        Detached on purpose: the hub has to outlive this script, which is what
+        lets the page survive a rerun.
+        """
+        if self._hub_is_up() or not self._auto_start_hub:
             return
-        width, height = target.size[0], target.size[1]
-        self._ensure_targets(width, height)
-        plan = self.render.prepare(self.scene, width, height)
-        encoder = self.device.create_command_encoder()
-        render_pass = encoder.begin_render_pass(
-            color_attachments=[{
-                'view': self._msaa_tex.create_view(),
-                'resolve_target': target.create_view(),
-                'clear_value': (1.0, 1.0, 1.0, 1.0),
-                'load_op': wgpu.LoadOp.clear,
-                'store_op': wgpu.StoreOp.store}],
-            depth_stencil_attachment={
-                'view': self._depth_tex.create_view(),
-                'depth_clear_value': 1.0,
-                'depth_load_op': wgpu.LoadOp.clear,
-                'depth_store_op': wgpu.StoreOp.store})
-        self.render.draw(render_pass, plan)
-        render_pass.end()
-        self.device.queue.submit([encoder.finish()])
-        self.dispatch('on_draw')
+        flags = {}
+        if sys.platform == 'win32':
+            flags['creationflags'] = (subprocess.DETACHED_PROCESS
+                                      | subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            flags['start_new_session'] = True
+        argv = [sys.executable, '-m', 'wrs.viewer.server',
+                '--host', self._host, '--port', str(self._port)]
+        # Opening a window is the right default -- the hub only starts when
+        # nothing was listening, so no page can be showing yet.  The escape
+        # hatch is for headless boxes and CI.
+        if not os.environ.get('WRS_VIEWER_NO_BROWSER'):
+            argv.append('--open')
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **flags)
+        deadline = time.time() + _HUB_BOOT_TIMEOUT
+        while time.time() < deadline:
+            if self._hub_is_up():
+                print(f'viewer hub started on http://{self._host}:{self._port}/')
+                return
+            time.sleep(0.2)
+        raise RuntimeError(
+            f'viewer hub did not come up on {self._host}:{self._port}; '
+            f'start it by hand with: {sys.executable} -m wrs.viewer.server')
 
+    # ------------------------------------------------------------- publisher
 
-def _default_win_size():
-    return 1280, 960
+    def _publish_forever(self):
+        asyncio.run(self._publish_loop())
+
+    async def _publish_loop(self):
+        url = f'ws://{self._host}:{self._port}/publish'
+        complained = None
+        while not self._closed:
+            try:
+                async with websockets.connect(url, max_size=None) as ws:
+                    complained = None
+                    await self._publish(ws)
+            except (OSError, websockets.WebSocketException) as exc:
+                # Retrying silently would leave the page showing a stale scene
+                # with nothing to explain it, so say it once -- and again only
+                # if the reason changes.
+                reason = f'{type(exc).__name__}: {exc}'
+                if reason != complained:
+                    print(f'viewer: publish to {url} failed -- {reason}',
+                          file=sys.stderr, flush=True)
+                    complained = reason
+                await asyncio.sleep(0.5)   # hub restarting, or not up yet
+
+    async def _publish(self, ws):
+        models = wvp.collect_models(self.scene)
+        await ws.send(wvp.scene_message(
+            'scene_init', models,
+            # The page keeps whatever camera the user last dragged to and only
+            # takes these on its first connect, so a rerun does not yank the
+            # viewpoint back to the default.
+            camera={
+                'pos': list(self.cam_pos),
+                'look_at': list(self.cam_lookat_pos),
+                'auto_orbit': bool(self.toggle_auto_cam_orbit),
+            }))
+        live = {meta['id'] for meta, _ in models}
+        # Scene out, events in -- concurrently, so a held key does not wait on
+        # the next frame and a slow frame does not swallow a keystroke.
+        await asyncio.gather(self._send_scene(ws, live),
+                             self._recv_events(ws))
+
+    async def _send_scene(self, ws, live):
+        interval = 1.0 / self._hz
+        sent_caption = None
+        while not self._closed:
+            # Diff the id set before streaming transforms, so an object added
+            # or removed after run() reaches the page instead of being visible
+            # only to whoever connects next.  Rebuilding the ids is the same
+            # walk collect_transforms already does, so this costs one extra
+            # pass, not one extra serialization.
+            current = dict((model_id, model) for model_id, model, _
+                           in wvp.iter_scene_models(self.scene))
+            added = [mid for mid in current if mid not in live]
+            removed = [mid for mid in live if mid not in current]
+            if added or removed:
+                await ws.send(wvp.scene_message(
+                    'scene_delta',
+                    [wvp.serialize(current[mid], mid) for mid in added],
+                    remove=removed))
+                live = set(current)
+            if self.caption != sent_caption:
+                sent_caption = self.caption
+                await ws.send(json.dumps(
+                    {'type': 'caption', 'text': sent_caption}))
+            await ws.send(wvp.transform_message(self.scene))
+            await asyncio.sleep(interval)
+
+    async def _recv_events(self, ws):
+        """Page -> script.  Key names arrive as JS KeyboardEvent strings, which
+        is exactly what key.symbol_from_name expects, so the browser ships the
+        raw name and the mapping stays in one place."""
+        async for message in ws:
+            try:
+                payload = json.loads(message)
+            except ValueError:
+                continue
+            if payload.get('type') != 'event':
+                continue
+            name = payload.get('name')
+            if name not in ('on_key_press', 'on_key_release'):
+                continue
+            symbol = wvk.symbol_from_name(payload.get('key', ''))
+            if symbol is not None:
+                # modifiers is 0, as the native input manager also left it
+                self._post_event(name, (symbol, 0))

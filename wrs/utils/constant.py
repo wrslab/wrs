@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 # color constants
@@ -68,7 +67,16 @@ class ExtendedColor:
 
 
 class Tab20:
-    _C = plt.get_cmap("tab20").colors  # raw RGB tuples
+    # matplotlib's "tab20", inlined: importing pyplot for twenty fixed colors
+    # cost ~0.25 s of the package import.  These are the palette's 8-bit
+    # values; /255 reproduces plt.get_cmap("tab20").colors exactly.
+    _C255 = ((31, 119, 180), (174, 199, 232), (255, 127, 14), (255, 187, 120),
+             (44, 160, 44), (152, 223, 138), (214, 39, 40), (255, 152, 150),
+             (148, 103, 189), (197, 176, 213), (140, 86, 75), (196, 156, 148),
+             (227, 119, 194), (247, 182, 210), (127, 127, 127),
+             (199, 199, 199), (188, 189, 34), (219, 219, 141),
+             (23, 190, 207), (158, 218, 229))
+    _C = tuple(tuple(v / 255 for v in rgb) for rgb in _C255)  # raw RGB tuples
     # ===== Blue pair =====
     BLUE_DEEP = np.array(_C[0], dtype=np.float32)
     BLUE_LIGHT = np.array(_C[1], dtype=np.float32)

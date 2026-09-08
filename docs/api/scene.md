@@ -42,7 +42,7 @@ _Mesh geometry operations on raw (vertices, faces) arrays: surface_
 ## `wrs.scene.render_model`
 
 - **class `RenderModel`** — rotmat and pos of model is for transforming local geometries
-  - methods: `clone`, `get_device_buffer`, `rgb`, `alpha`, `quat`, `pos`, `rotmat`, `loc_tf`, `set_pos_rotmat`
+  - methods: `clone`, `vrgbs`, `rgb`, `alpha`, `quat`, `pos`, `rotmat`, `loc_tf`, `set_pos_rotmat`
 
 ## `wrs.scene.render_model_primitive`
 

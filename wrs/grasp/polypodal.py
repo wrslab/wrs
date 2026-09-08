@@ -472,12 +472,11 @@ if __name__ == "__main__":
     held_for = [0.0]
 
     def _step(dt):
-        im = base.input_manager
-        if im.is_key_pressed_edge(pkey.SPACE):
+        if base.is_key_pressed_edge(pkey.SPACE):
             cursor[0] = (cursor[0] + 1) % n_tup
             _show(cursor[0])
             held_for[0] = 0.0
-        elif im.is_key_pressed(pkey.SPACE):
+        elif base.is_key_pressed(pkey.SPACE):
             held_for[0] += dt
             if held_for[0] >= REPEAT_DELAY:
                 cursor[0] = (cursor[0] + 1) % n_tup

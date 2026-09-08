@@ -1,8 +1,6 @@
 from wrs import wum, wvw, wuc, wssop, wsso
-from wrs.stream.websocket_server import run_stream
 
 base = wvw.World(cam_pos=(.3, .3, .3), toggle_auto_cam_orbit=True)
-run_stream(base.scene, host="127.0.0.1", port=8000, hz=30)
 
 oframe = wssop.frame()
 bunny = wsso.SceneObject.from_file("bunny.stl", collision_type=wuc.CollisionType.CAPSULE)

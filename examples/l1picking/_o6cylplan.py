@@ -83,7 +83,7 @@ def plan_save_show(cyl, out_json, label, primitive='pinch'):
     show(0)
 
     def tick(dt):
-        if base.input_manager.is_key_pressed_edge(key.N):
+        if base.is_key_pressed_edge(key.N):
             state["i"] = (state["i"] + 1) % len(grasps)
             show(state["i"])
 

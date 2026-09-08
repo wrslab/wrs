@@ -92,9 +92,9 @@ def main(primitive='pinch'):
     import wrs.viewer.key as key
 
     def tick(dt):
-        if base.input_manager.is_key_pressed_edge(key.N):
+        if base.is_key_pressed_edge(key.N):
             show(state['cur'] + 1)
-        if base.input_manager.is_key_pressed_edge(key.R):
+        if base.is_key_pressed_edge(key.R):
             replan()
 
     base.schedule_interval(tick, interval=0.05)

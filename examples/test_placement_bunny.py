@@ -50,7 +50,7 @@ def update(dt):
     global cur_idx
     if not stable_poses:
         return
-    if base.input_manager.is_key_pressed_edge(key.SPACE):
+    if base.is_key_pressed_edge(key.SPACE):
         show_pose(cur_idx)
         cur_idx = (cur_idx + 1) % len(stable_poses)
 

@@ -22,7 +22,7 @@ counter = [0]
 def draw_segmented(dt, geom, segmented, counter):
     if counter[0] >= len(segmented):
         return
-    if base.input_manager.is_key_pressed(key.SPACE):
+    if base.is_key_pressed(key.SPACE):
         fids = segmented[counter[0]]
         wssop.mesh(geom.vs, geom.fs[fids],
                    rgb=(1, 0, 0)).add_to_scene(base.scene)

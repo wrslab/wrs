@@ -164,24 +164,24 @@ def move_bunny_once():
     moved = False
     pos = np.array(bunny.pos, dtype=np.float32)
 
-    if base.input_manager.is_key_pressed(key.W):
+    if base.is_key_pressed(key.W):
         pos[1] += move_step
         moved = True
-    if base.input_manager.is_key_pressed(key.S):
+    if base.is_key_pressed(key.S):
         pos[1] -= move_step
         moved = True
-    if base.input_manager.is_key_pressed(key.A):
+    if base.is_key_pressed(key.A):
         pos[0] -= move_step
         moved = True
-    if base.input_manager.is_key_pressed(key.D):
+    if base.is_key_pressed(key.D):
         pos[0] += move_step
         moved = True
     rot_step = np.deg2rad(10.0)
-    if base.input_manager.is_key_pressed(key.Q):
+    if base.is_key_pressed(key.Q):
         rz = wum.rotmat_from_euler(0, 0, rot_step)
         bunny.rotmat = rz @ bunny.rotmat  # world Z
         moved = True
-    if base.input_manager.is_key_pressed(key.E):
+    if base.is_key_pressed(key.E):
         rz = wum.rotmat_from_euler(0, 0, -rot_step)
         bunny.rotmat = rz @ bunny.rotmat  # world Z
         moved = True

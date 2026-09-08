@@ -25,8 +25,8 @@ try:
             print(f"Sol {i+1}: q1={q_deg[0]:6.2f}°, q2={q_deg[1]:6.2f}°, q3={q_deg[2]:6.2f}°")
             
             # Verify with FK
-            robot.set_jnt_values(sol)
-            fk_tcp = robot.get_gl_tcp()[:3, 3]
+            robot.fk(qs=sol)
+            fk_tcp = robot.tcp('flange').tf[:3, 3]
             error = np.linalg.norm(fk_tcp - target_pos)
             print(f"        FK TCP: {fk_tcp}, error: {error*1000:.2f}mm")
     else:

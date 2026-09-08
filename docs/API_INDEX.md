@@ -315,7 +315,7 @@ _Time-optimal retiming of a joint waypoint path (Kunz-Stilman style)._
 - `debug_contacts(mjenv)`
 - **class `MJContactViz`**
   - methods: `clear`, `update_from_data`
-- **class `MjContactForceViz`**
+- **class `MJContactForceViz`**
   - methods: `clear`, `update_from_data`
 
 ## `wrs.physics.mj_env`
@@ -675,7 +675,7 @@ _Mesh geometry operations on raw (vertices, faces) arrays: surface_
 ## `wrs.scene.render_model`
 
 - **class `RenderModel`** — rotmat and pos of model is for transforming local geometries
-  - methods: `clone`, `get_device_buffer`, `rgb`, `alpha`, `quat`, `pos`, `rotmat`, `loc_tf`, `set_pos_rotmat`
+  - methods: `clone`, `vrgbs`, `rgb`, `alpha`, `quat`, `pos`, `rotmat`, `loc_tf`, `set_pos_rotmat`
 
 ## `wrs.scene.render_model_primitive`
 
@@ -717,16 +717,6 @@ _Mesh geometry operations on raw (vertices, faces) arrays: surface_
 - `point_cloud(vs, vrgbs, alpha=1.0)` — Build a point-cloud SceneObject from per-vertex positions and colors.
 - `frustrum(base_center=(0, 0, 0), top_center=(0, 0, 0.05), bottom_length=0.05, top_length=0.03, rgb=wuc.BasicColor.DEFAULT, alpha=1.0, **kwargs)`
 - `mesh(vs, fs, collision_type=None, is_floating=False, rgb=wuc.BasicColor.DEFAULT, alpha=1.0, **kwargs)` — Build a SceneObject from user-specified vertices/faces.
-
-## `wrs.stream.websocket_server`
-
-- `collect_scene_meshes(scene)`
-- `collect_scene_transforms(scene)`
-- `handler(websocket, scene, hz=30)`
-- `start_stream(scene, host='127.0.0.1', port=8000, hz=30)`
-- `run_stream(scene, host='127.0.0.1', port=8000, hz=30)`
-- `get_scene_from_builtins()`
-- `main()`
 
 ## `wrs.utils.constant`
 
@@ -862,49 +852,35 @@ _Transform & rotation math: rotmat_from_* (axangle, quat, euler, rotvec,_
 - `ensure_tf(tf=None)`
 - `ensure_rgb(rgb=None)`
 
-## `wrs.viewer.camera`
-_Scene camera._
+## `wrs.utils.scheduler`
+_Timed callbacks for a viewer loop, ticked once per frame._
 
-- `perspective(fov_deg, aspect, near, far)` — Right-handed perspective looking down -z, depth mapped to [0, 1].
-- **class `Camera`** — The scene camera. Self-contained: it carries its own pose (``tf``, world)
-  - methods: `set_to`, `orbit`, `mouse_orbit`, `mouse_pan`, `mouse_zoom`, `pos`, `rotmat`, `tf`, `look_at`, `up`, `fov`, `near`, `far`, `view_mat`, `proj_mat`
-
-## `wrs.viewer.device_buffer`
-_wgpu counterpart of viewer.device_buffer._
-
-- **class `DeviceBufferBase`**
-- **class `MeshBuffer`**
-  - methods: `update_instances`, `bind`, `draw_instanced`
-- **class `PointCloudBuffer`** — One instance per point; the quad corners come from Render's shared
-  - methods: `set_model`, `draw`
-
-## `wrs.viewer.input_manager`
-_Keyboard and pointer state, on rendercanvas events._
-
-- **class `InputManager`**
-  - methods: `is_key_pressed`, `is_key_pressed_edge`, `is_button_pressed`
+- **class `Scheduler`** — Timed callbacks, called as ``fn(dt, *args, **kwargs)``.
+  - methods: `schedule_interval`, `schedule_once`, `unschedule`, `tick`
 
 ## `wrs.viewer.key`
 _Key symbols: ASCII for printable keys, X11 keysyms for the rest._
 
 - `symbol_from_name(name)` — rendercanvas key name -> key symbol, or None if unmapped.
 
-## `wrs.viewer.offscreen`
-_Headless rendering: one frame straight into a numpy RGBA array._
+## `wrs.viewer.protocol`
+_Scene -> wire._
 
-- `render_to_array(scene, camera, width=960, height=720, sample_count=4, bg=(1.0, 1.0, 1.0, 1.0))` — Render one frame and return an (h, w, 4) uint8 array.
-- `save_png(path, rgba)` — Minimal zlib/PNG writer so verification needs no image library.
-- **class `OffscreenTarget`**
-  - methods: `read_rgba`
+- `serialize(model, model_id: str)`
+- `iter_scene_models(scene)` — Walk the scene as (model_id, model, owner) -- no serialization.
+- `collect_models(scene)`
+- `collect_transforms(scene)`
 
-## `wrs.viewer.render`
-_Renderer for the wgpu backend._
+## `wrs.viewer.server`
+_The hub: one long-lived process, one port, serving the page and relaying_
 
-- **class `Render`**
-  - methods: `prepare`, `draw`
+- `serve(host='127.0.0.1', port=DEFAULT_PORT)`
+- `main()`
+- **class `Hub`** — Fan-out from one publisher to any number of viewers.
+  - methods: `on_publish`, `on_view`
 
 ## `wrs.viewer.world`
-_The window, the scene it shows, and the loop that drives them._
+_The world a script builds its scene in, drawn by the browser page._
 
-- **class `World`**
-  - methods: `set_scene`, `set_caption`, `auto_cam_orbit`, `schedule_interval`, `schedule_once`, `schedule_interval_after`, `stop`, `stop_after`, `event`, `dispatch`, `close`, `run`
+- **class `World`** — Same surface as the old native World, minus the window.
+  - methods: `set_scene`, `set_caption`, `auto_cam_orbit`, `schedule_interval`, `schedule_once`, `schedule_interval_after`, `stop`, `stop_after`, `event`, `dispatch`, `is_key_pressed`, `close`, `run`, `post_event`

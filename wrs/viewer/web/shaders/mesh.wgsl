@@ -1,15 +1,13 @@
-"""Shaders for the scene renderer.
-
-Everything the shaders read lives in the single ``Globals`` uniform buffer
-below (bind group 0); WGSL has no loose uniforms.
-
-Note ``dpdy`` differentiates against framebuffer y, which grows downwards,
-so the facet-normal cross product is taken as ``cross(dY, dX)`` to come out
-pointing away from the surface.
-"""
-
-# std140-ish layout, 160 bytes; see render.Globals for the numpy mirror.
-_GLOBALS = """
+// Shaders for the scene renderer.
+//
+// Everything the shaders read lives in the single Globals uniform buffer
+// below (bind group 0); WGSL has no loose uniforms.
+//
+// Note dpdy differentiates against framebuffer y, which grows downwards, so
+// the facet-normal cross product is taken as cross(dY, dX) to come out
+// pointing away from the surface.
+//
+// The vertex layouts that feed these entry points live in web/renderer.js.
 struct Globals {
     view       : mat4x4<f32>,
     proj       : mat4x4<f32>,
@@ -40,9 +38,7 @@ fn srgb_to_linear(c : vec3<f32>) -> vec3<f32> {
     let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
-"""
 
-mesh_wgsl = _GLOBALS + """
 struct VsIn {
     @location(0) pos    : vec3<f32>,
     @location(1) normal : vec3<f32>,
@@ -113,37 +109,3 @@ fn fs_matte(in : VsOut) -> @location(0) vec4<f32> {
 fn fs_outline(in : VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
-"""
-
-# WGSL has no gl_PointSize, so points are instanced screen-space quads: one
-# 6-vertex unit quad, one instance per point, expanded in clip space so the
-# on-screen size stays point_size pixels regardless of depth.
-pcd_wgsl = _GLOBALS + """
-@group(1) @binding(0) var<uniform> u_model : mat4x4<f32>;
-
-struct VsIn {
-    @location(0) corner : vec2<f32>,
-    @location(1) pos    : vec3<f32>,
-    @location(2) rgb    : vec3<f32>,
-};
-
-struct VsOut {
-    @builtin(position) clip : vec4<f32>,
-    @location(0) rgb : vec3<f32>,
-};
-
-@vertex
-fn vs_pcd(in : VsIn) -> VsOut {
-    var clip = g.proj * g.view * u_model * vec4<f32>(in.pos, 1.0);
-    let offset = in.corner * g.point_size / g.viewport * clip.w;
-    var out : VsOut;
-    out.clip = vec4<f32>(clip.xy + offset, clip.zw);
-    out.rgb = in.rgb;
-    return out;
-}
-
-@fragment
-fn fs_pcd(in : VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.rgb, 1.0);
-}
-"""

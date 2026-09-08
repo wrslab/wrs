@@ -19,7 +19,7 @@ Prefer these in-house utilities over trimesh / scipy / open3d / fcl. Auto-genera
 - `debug_contacts(mjenv)`
 - **class `MJContactViz`**
   - methods: `clear`, `update_from_data`
-- **class `MjContactForceViz`**
+- **class `MJContactForceViz`**
   - methods: `clear`, `update_from_data`
 
 ## `wrs.physics.mj_env`

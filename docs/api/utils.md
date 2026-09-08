@@ -135,3 +135,9 @@ _Transform & rotation math: rotmat_from_* (axangle, quat, euler, rotvec,_
 - `ensure_vec(vec, length=None)`
 - `ensure_tf(tf=None)`
 - `ensure_rgb(rgb=None)`
+
+## `wrs.utils.scheduler`
+_Timed callbacks for a viewer loop, ticked once per frame._
+
+- **class `Scheduler`** — Timed callbacks, called as ``fn(dt, *args, **kwargs)``.
+  - methods: `schedule_interval`, `schedule_once`, `unschedule`, `tick`

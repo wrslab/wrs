@@ -164,15 +164,15 @@ def main():
     load(0)
 
     def tick(dt):
-        if base.input_manager.is_key_pressed_edge(key.R):
+        if base.is_key_pressed_edge(key.R):
             load(state['cur'])                # reset the current grasp to frame 0
             return
-        if base.input_manager.is_key_pressed_edge(key.N):
+        if base.is_key_pressed_edge(key.N):
             next_grasp()                      # switch to next grasp, paused for F/G
             return
-        if base.input_manager.is_key_pressed_edge(key.G):
+        if base.is_key_pressed_edge(key.G):
             state['playing'] = not state['playing']
-        if base.input_manager.is_key_pressed_edge(key.F):
+        if base.is_key_pressed_edge(key.F):
             state['playing'] = False
             step_one()
         if state['playing']:

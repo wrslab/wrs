@@ -13,6 +13,5 @@ Browse by subpackage (or see the single-page [API Index](../API_INDEX.md)):
 - [`wrs.physics`](physics.md) — 9 modules, 7 functions, 18 classes
 - [`wrs.robots`](robots.md) — 43 modules, 72 functions, 45 classes
 - [`wrs.scene`](scene.md) — 7 modules, 37 functions, 12 classes
-- [`wrs.stream`](stream.md) — 1 modules, 7 functions, 0 classes
-- [`wrs.utils`](utils.md) — 5 modules, 101 functions, 15 classes
-- [`wrs.viewer`](viewer.md) — 7 modules, 4 functions, 8 classes
+- [`wrs.utils`](utils.md) — 6 modules, 101 functions, 16 classes
+- [`wrs.viewer`](viewer.md) — 4 modules, 7 functions, 2 classes

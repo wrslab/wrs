@@ -193,27 +193,26 @@ def main():
     redraw()
 
     def tick(dt):
-        im = base.input_manager
         for kc, ax in ((key.X, 0), (key.Y, 1), (key.Z, 2)):
-            if im.is_key_pressed_edge(kc):
+            if base.is_key_pressed_edge(kc):
                 state["axis"] = ax
                 redraw()
-        if (im.is_key_pressed_edge(key.BRACKETLEFT)
-                or im.is_key_pressed_edge(key.COMMA)
-                or im.is_key_pressed_edge(key.DOWN)):
+        if (base.is_key_pressed_edge(key.BRACKETLEFT)
+                or base.is_key_pressed_edge(key.COMMA)
+                or base.is_key_pressed_edge(key.DOWN)):
             state["idx"][state["axis"]] -= 1
             redraw()
-        if (im.is_key_pressed_edge(key.BRACKETRIGHT)
-                or im.is_key_pressed_edge(key.PERIOD)
-                or im.is_key_pressed_edge(key.UP)):
+        if (base.is_key_pressed_edge(key.BRACKETRIGHT)
+                or base.is_key_pressed_edge(key.PERIOD)
+                or base.is_key_pressed_edge(key.UP)):
             state["idx"][state["axis"]] += 1
             redraw()
-        if im.is_key_pressed_edge(key.A):
+        if base.is_key_pressed_edge(key.A):
             state["cloud_on"] = not state["cloud_on"]
             (cloud.add_to_scene if state["cloud_on"]
              else cloud.remove_from_scene)(base.scene)
             base.scene.dirty = True
-        if im.is_key_pressed_edge(key.O):
+        if base.is_key_pressed_edge(key.O):
             for o in state["objs"]:
                 o.remove_from_scene(base.scene)
             state["objs"] = []

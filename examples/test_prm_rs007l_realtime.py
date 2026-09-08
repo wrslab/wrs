@@ -78,9 +78,9 @@ def clear_debug():
 
 def update_obstacles_by_keys(dt):
     speed = 0.05
-    if base.input_manager.is_key_pressed(key.W):
+    if base.is_key_pressed(key.W):
         box.pos = (box.pos[0], box.pos[1], box.pos[2] + speed)
-    if base.input_manager.is_key_pressed(key.S):
+    if base.is_key_pressed(key.S):
         box.pos = (box.pos[0], box.pos[1], box.pos[2] - speed)
 
 

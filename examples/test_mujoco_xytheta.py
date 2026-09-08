@@ -46,7 +46,7 @@ base.stop_after(mjenv.step, 2)
 
 
 def control(dt, base, mjenv):
-    k = base.input_manager.pressed_keys
+    k = base.pressed_keys
     v_body = np.zeros(3)
     if key.W in k: v_body[0] += 0.5  # forward
     if key.S in k: v_body[0] -= 0.5  # backward

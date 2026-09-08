@@ -2,9 +2,6 @@ import numpy as np
 import wrs.utils.math as wum
 import wrs.utils.decorator as wud
 import wrs.geom.geometry as wgg
-import wrs.viewer.device_buffer as wvdb
-
-_device_buffer_cache = {}
 
 
 class RenderModel:
@@ -35,7 +32,6 @@ class RenderModel:
         # cached
         self._loc_tf = wum.tf_from_pos_rotmat(self._pos, self._rotmat)
         self._dirty = True
-        self._pcd_buffer = None  # lazily built, cached point-cloud GPU buffer
 
     def clone(self):
         new = self.__class__(geom=self.geom,
@@ -46,29 +42,10 @@ class RenderModel:
                              shader=self.shader)
         return new
 
-    def get_device_buffer(self):
-        if self.geom.fs is None:
-            # Point cloud: cache the buffer on the model. get_device_buffer()
-            # is called every frame (render._draw_pcd) and on every scene
-            # rebuild; building a fresh PointCloudBuffer each time allocates a
-            # new GPU VAO/VBO that is never freed -> VRAM leak that crashes the
-            # process after a while of live re-posing. Geometry is immutable
-            # here, so one buffer per model is enough.
-            if self._vrgbs is None:
-                raise ValueError(
-                    "PointCloudBuffer requires per-vertex rgb colors")
-            if self._pcd_buffer is None:
-                self._pcd_buffer = wvdb.PointCloudBuffer(
-                    self.geom.vs, self._vrgbs)
-            return self._pcd_buffer
-        gid = id(self.geom)
-        if gid in _device_buffer_cache:
-            return _device_buffer_cache[gid]
-        else:
-            buf = wvdb.MeshBuffer(
-                self.geom.vs, self.geom.fs, self.geom.vns)
-            _device_buffer_cache[gid] = buf
-            return buf
+    @property
+    def vrgbs(self):
+        """Per-vertex colours, or None for anything but a point cloud."""
+        return self._vrgbs
 
     @property
     def rgb(self):

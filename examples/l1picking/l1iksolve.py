@@ -79,13 +79,12 @@ def main():
     solve_and_show()
 
     def tick(dt):
-        im = base.input_manager
         moved = False
         dp = np.zeros(3, dtype=np.float32)
         for k, ax, sgn in ((key.Q, 0, 1), (key.A, 0, -1),
                            (key.W, 1, 1), (key.S, 1, -1),
                            (key.E, 2, 1), (key.D, 2, -1)):
-            if im.is_key_pressed(k):
+            if base.is_key_pressed(k):
                 dp[ax] += sgn * POS_STEP
                 moved = True
         if moved:
@@ -96,15 +95,15 @@ def main():
                              (key.J, wuc.StandardAxis.Y, -1),
                              (key.I, wuc.StandardAxis.Z, 1),
                              (key.K, wuc.StandardAxis.Z, -1)):
-            if im.is_key_pressed(k):
+            if base.is_key_pressed(k):
                 # rotate about WORLD axis -> pre-multiply
                 tgt["rot"] = (wum.rotmat_from_axangle(axis, sgn * ROT_STEP)
                               @ tgt["rot"]).astype(np.float32)
                 moved = True
-        if im.is_key_pressed_edge(key.N):
+        if base.is_key_pressed_edge(key.N):
             tgt["sol"] += 1
             moved = True
-        if im.is_key_pressed_edge(key.R):
+        if base.is_key_pressed_edge(key.R):
             tgt["pos"] = DEFAULT_POS.copy()
             tgt["rot"] = DEFAULT_ROT.copy()
             tgt["sol"] = 0
