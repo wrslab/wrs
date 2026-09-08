@@ -19,6 +19,7 @@ export class InputManager {
     this.domElement = domElement;
     this.onEvent = onEvent;
     this._buttons = new Set();
+    this._held = new Set();
     this._lastX = 0;
     this._lastY = 0;
     this._bind();
@@ -36,6 +37,14 @@ export class InputManager {
     // focused, and nothing here ever asks for focus
     window.addEventListener('keydown', (e) => this._onKey('on_key_press', e));
     window.addEventListener('keyup', (e) => this._onKey('on_key_release', e));
+    // Releasing a key while the page is not focused delivers no keyup, and
+    // the script would hold that key forever.  Let go of everything instead.
+    window.addEventListener('blur', () => this._releaseAll());
+  }
+
+  _releaseAll() {
+    this._held.forEach((key) => this.onEvent('on_key_release', key));
+    this._held.clear();
   }
 
   /**
@@ -49,6 +58,8 @@ export class InputManager {
    */
   _onKey(name, e) {
     if (e.repeat || !this.onEvent) return;
+    if (name === 'on_key_press') this._held.add(e.key);
+    else this._held.delete(e.key);
     this.onEvent(name, e.key);
   }
 
@@ -83,8 +94,8 @@ export class InputManager {
 
   _onWheel(e) {
     e.preventDefault();
-    // input_manager passes event dy / 100; a forward scroll is negative in
-    // both worlds, and a negative delta pulls the eye towards the target.
-    this.camera.mouseZoom(e.deltaY / 100.0);
+    // Scroll back (deltaY > 0) to zoom in, forward to zoom out.  mouseZoom
+    // pushes the eye away for a positive delta, hence the sign flip.
+    this.camera.mouseZoom(-e.deltaY / 100.0);
   }
 }

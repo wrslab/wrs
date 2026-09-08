@@ -77,11 +77,16 @@ def clear_debug():
 
 
 def update_obstacles_by_keys(dt):
-    speed = 0.05
+    """On its own fast schedule: tick() below spends most of a period
+    planning, so driving the box from there caps it at 5 Hz and feels stuck."""
+    speed = 0.6                       # m/s, integrated over the real dt
+    dz = 0.0
     if base.is_key_pressed(key.W):
-        box.pos = (box.pos[0], box.pos[1], box.pos[2] + speed)
+        dz += speed * dt
     if base.is_key_pressed(key.S):
-        box.pos = (box.pos[0], box.pos[1], box.pos[2] - speed)
+        dz -= speed * dt
+    if dz:
+        box.pos = (box.pos[0], box.pos[1], box.pos[2] + dz)
 
 
 def is_path_valid(path, cursor, window=K):
@@ -104,7 +109,6 @@ def is_path_valid(path, cursor, window=K):
 
 def tick(dt):
     global path, state, current_target, cursor, tol
-    update_obstacles_by_keys(dt)
     if pln_ctx.states_equal(
             state, current_target, tol=tol):
         if np.allclose(state, current_target):
@@ -131,5 +135,6 @@ def tick(dt):
     robot.fk(qs=state)
 
 
+base.schedule_interval(update_obstacles_by_keys, interval=0.02)
 base.schedule_interval(tick, interval=0.2)
 base.run()

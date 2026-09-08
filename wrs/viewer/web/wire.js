@@ -27,11 +27,11 @@ export function decode(buffer) {
   return { header, view };
 }
 
-/** One header entry plus its arrays, shaped the way Renderer.add wants it. */
-export function readModel(entry, view) {
-  const model = { id: entry.id, kind: entry.kind, rgba: entry.rgba };
+/** One geometry entry plus its arrays, as Renderer.addGeometry wants it. */
+export function readGeometry(entry, view) {
+  const geometry = { id: entry.id, kind: entry.kind };
   Object.keys(FIELD_TYPES).forEach((name) => {
-    if (entry[name]) model[name] = view(entry[name], FIELD_TYPES[name]);
+    if (entry[name]) geometry[name] = view(entry[name], FIELD_TYPES[name]);
   });
-  return model;
+  return geometry;
 }

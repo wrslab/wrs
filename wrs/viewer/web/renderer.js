@@ -106,6 +106,7 @@ export class Renderer {
     this.canvas = canvas;
     this.device = device;
     this.models = new Map();
+    this.geometries = new Map();
     this._targetSize = [0, 0];
     this._msaaTex = null;
     this._depthTex = null;
@@ -226,15 +227,16 @@ export class Renderer {
 
   // ------------------------------------------------------------------ scene
 
-  /** Drop every model and free its buffers -- called on each scene_init. */
+  /** Drop everything and free it -- called on each scene_init. */
   clear() {
-    this.models.forEach((model) => {
-      model.buffers.forEach((buffer) => buffer.destroy());
-    });
+    this.models.forEach((model) => model.buffers.forEach((b) => b.destroy()));
+    this.geometries.forEach((g) => g.buffers.forEach((b) => b.destroy()));
     this.models.clear();
+    this.geometries.clear();
   }
 
-  /** Drop one model -- the page half of a scene_delta removal. */
+  /** Drop one model -- the page half of a scene_delta removal.  Its geometry
+   *  stays: other models may share it, and the next scene_init frees it. */
   remove(id) {
     const model = this.models.get(id);
     if (!model) return;
@@ -242,62 +244,60 @@ export class Renderer {
     this.models.delete(id);
   }
 
-  /** Add one drawable, dispatching on the kind the server tagged it with. */
-  add(payload) {
-    if (payload.kind === 'pcd') this._addPointCloud(payload);
-    else this._addMesh(payload);
-  }
-
-  _addMesh({ id, vertices, faces, normals, rgba }) {
-    if (!faces || faces.length === 0) return;
+  /**
+   * Upload one shared geometry.  robot.clone() reuses its meshes, so a scene
+   * of ghost poses is many models over very few geometries -- each set of
+   * vertices is uploaded once and drawn by everything that names it.
+   */
+  addGeometry({ id, kind, vertices, faces, normals, points, colors }) {
+    if (this.geometries.has(id)) return;
     const device = this.device;
-    const instanceUsage = GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST;
-
+    if (kind === 'pcd') {
+      const instanceBuf = createBufferWithData(
+        device, interleave3x2(points, colors), GPUBufferUsage.VERTEX);
+      this.geometries.set(id, {
+        kind, buffers: [instanceBuf], instanceBuf, count: points.length / 3 });
+      return;
+    }
     const vertexBuf = createBufferWithData(
       device, interleave3x2(vertices, normals), GPUBufferUsage.VERTEX);
     // faces already arrives as a Uint32Array view on the socket buffer
     const indexBuf = createBufferWithData(device, faces, GPUBufferUsage.INDEX);
+    this.geometries.set(id, {
+      kind, buffers: [vertexBuf, indexBuf],
+      vertexBuf, indexBuf, indexCount: faces.length });
+  }
+
+  /** Add one drawable: a pose and a colour over a geometry already uploaded. */
+  add({ id, geom, kind, rgba }) {
+    const geometry = this.geometries.get(geom);
+    if (!geometry) return;
+    const device = this.device;
+
+    if (kind === 'pcd') {
+      // pcd takes its model matrix through a uniform, so it needs a bind group
+      const modelBuf = device.createBuffer({
+        size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.models.set(id, {
+        kind, geometry, buffers: [modelBuf], tfBuf: modelBuf,
+        modelBindGroup: device.createBindGroup({
+          layout: this.modelLayout,
+          entries: [{ binding: 0, resource: { buffer: modelBuf } }] }),
+        ...this._freshTransform(modelBuf),
+      });
+      return;
+    }
+
+    const instanceUsage = GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST;
     const tfBuf = device.createBuffer({ size: 64, usage: instanceUsage });
     const rgbaBuf = createBufferWithData(
       device, new Float32Array(rgba), instanceUsage);
-
     this.models.set(id, {
-      kind: 'mesh',
-      buffers: [vertexBuf, indexBuf, tfBuf, rgbaBuf],
-      vertexBuf,
-      indexBuf,
-      rgbaBuf,
-      tfBuf,
-      indexCount: faces.length,
+      kind, geometry, buffers: [tfBuf, rgbaBuf], tfBuf, rgbaBuf,
       // render.py splits the same way: alpha < 0.999 goes to the transparent
       // pipeline, and only the solid group gets an outline pass
       opaque: rgba[3] >= 0.999,
       ...this._freshTransform(tfBuf),
-    });
-  }
-
-  _addPointCloud({ id, points, colors }) {
-    if (!points || points.length === 0) return;
-    const device = this.device;
-
-    const instanceBuf = createBufferWithData(
-      device, interleave3x2(points, colors), GPUBufferUsage.VERTEX);
-    const modelBuf = device.createBuffer({
-      size: 64,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    this.models.set(id, {
-      kind: 'pcd',
-      buffers: [instanceBuf, modelBuf],
-      instanceBuf,
-      tfBuf: modelBuf,
-      modelBindGroup: device.createBindGroup({
-        layout: this.modelLayout,
-        entries: [{ binding: 0, resource: { buffer: modelBuf } }],
-      }),
-      count: points.length / 3,
-      ...this._freshTransform(modelBuf),
     });
   }
 
@@ -308,7 +308,10 @@ export class Renderer {
   _freshTransform(buffer) {
     const tf = new Float32Array(IDENTITY);
     this.device.queue.writeBuffer(buffer, 0, tf);
-    return { tf, tfDirty: false };
+    // `posed` gates drawing: a model is invisible until its first matrix
+    // arrives, so a big scene never flashes up piled on the origin while the
+    // publisher is still building the pose frame.
+    return { tf, tfDirty: false, posed: false };
   }
 
   setTransform(id, matrix) {
@@ -316,6 +319,7 @@ export class Renderer {
     if (!model) return;
     model.tf.set(matrix);   // already column-major on the wire; see math.js
     model.tfDirty = true;
+    model.posed = true;
   }
 
   // ------------------------------------------------------------------- draw
@@ -345,6 +349,7 @@ export class Renderer {
         this.device.queue.writeBuffer(model.tfBuf, 0, model.tf);
         model.tfDirty = false;
       }
+      if (!model.posed) return;
       if (model.kind === 'pcd') pcd.push(model);
       else (model.opaque ? solid : transparent).push(model);
     });
@@ -382,11 +387,11 @@ export class Renderer {
     pass.setBindGroup(0, this.globalsBindGroup);
 
     const drawMeshes = (list) => list.forEach((model) => {
-      pass.setVertexBuffer(0, model.vertexBuf);
+      pass.setVertexBuffer(0, model.geometry.vertexBuf);
       pass.setVertexBuffer(1, model.tfBuf);
       pass.setVertexBuffer(2, model.rgbaBuf);
-      pass.setIndexBuffer(model.indexBuf, 'uint32');
-      pass.drawIndexed(model.indexCount, 1);
+      pass.setIndexBuffer(model.geometry.indexBuf, 'uint32');
+      pass.drawIndexed(model.geometry.indexCount, 1);
     });
 
     if (solid.length) {
@@ -404,8 +409,8 @@ export class Renderer {
       pass.setVertexBuffer(0, this.quadBuf);
       pcd.forEach((model) => {
         pass.setBindGroup(1, model.modelBindGroup);
-        pass.setVertexBuffer(1, model.instanceBuf);
-        pass.draw(6, model.count);
+        pass.setVertexBuffer(1, model.geometry.instanceBuf);
+        pass.draw(6, model.geometry.count);
       });
     }
 

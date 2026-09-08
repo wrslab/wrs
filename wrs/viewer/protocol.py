@@ -33,6 +33,13 @@ from typing import Any, Dict, Iterator, List, Tuple
 
 import numpy as np
 
+DEFAULT_PORT = 8000
+
+# Close code the hub uses to retire a publisher when a newer script takes
+# over.  It has to be distinguishable from an ordinary drop: a plain close
+# means "hub restarting, try again", while this one means "stop trying".
+SUPERSEDED = 4000
+
 # field -> numpy dtype.  The page mirrors this when it builds its views.
 ARRAY_FIELDS = {
     'vertices': np.float32,
@@ -117,58 +124,92 @@ def iter_scene_models(scene) -> Iterator[Tuple[str, Any, Any]]:
 
 # ------------------------------------------------------------- serialization
 
-def serialize(model, model_id: str) -> Tuple[Dict[str, Any], Dict[str, bytes]]:
-    """One drawable as (metadata, {field: raw bytes}).
+# Geometry is shared: robot.clone() reuses its meshes, so a scene showing 15
+# ghost poses holds 112 models over 7 distinct geoms.  Numbering the geoms lets
+# each one travel once and every model that uses it just name it -- the same
+# trick render.py played with its device-buffer cache.
+_geom_serials = weakref.WeakKeyDictionary()
+_geom_counter = itertools.count()
 
-    Kept apart from the framing so the hub can cache a model and re-frame it
-    for a viewer that connects later without ever decoding the floats.
+
+def _geom_key(geom) -> int:
+    key = _geom_serials.get(geom)
+    if key is None:
+        key = next(_geom_counter)
+        _geom_serials[geom] = key
+    return key
+
+
+def model_entry(model, model_id: str) -> Dict[str, Any]:
+    """A drawable with no arrays of its own: which geometry, and what colour."""
+    entry = {'id': model_id, 'geom': _geom_key(model.geom),
+             'kind': 'pcd' if model.geom.fs is None else 'mesh'}
+    if entry['kind'] == 'mesh':
+        entry['rgba'] = [float(model.rgb[0]), float(model.rgb[1]),
+                         float(model.rgb[2]), float(model.alpha)]
+    return entry
+
+
+def geometry_entry(model) -> Tuple[Dict[str, Any], Dict[str, bytes]]:
+    """That geometry's arrays, as (metadata, {field: raw bytes}).
+
+    Kept apart from the framing so the hub can cache one and re-frame it for a
+    viewer that connects later without ever decoding the floats.
     """
     geom = model.geom
+    meta = {'id': _geom_key(geom),
+            'kind': 'pcd' if geom.fs is None else 'mesh'}
     if geom.fs is None:
         vrgbs = model.vrgbs
         if vrgbs is None:
-            raise ValueError(f"point cloud {model_id} has no per-vertex colors")
-        meta = {'id': model_id, 'kind': 'pcd'}
-        fields = {
+            raise ValueError('point cloud has no per-vertex colors')
+        return meta, {
             'points': np.ascontiguousarray(geom.vs, np.float32).tobytes(),
             'colors': np.ascontiguousarray(vrgbs, np.float32).tobytes(),
         }
-        return meta, fields
-    meta = {
-        'id': model_id,
-        'kind': 'mesh',
-        'rgba': [float(model.rgb[0]), float(model.rgb[1]),
-                 float(model.rgb[2]), float(model.alpha)],
-    }
     # Ship the normals: vs_outline inflates the hull along them, so they have
     # to be geom.vns exactly -- anything the page recomputed for itself would
     # give the silhouette a different width.
-    fields = {
+    return meta, {
         'vertices': np.ascontiguousarray(geom.vs, np.float32).tobytes(),
         'faces': np.ascontiguousarray(geom.fs, np.uint32).tobytes(),
         'normals': np.ascontiguousarray(geom.vns, np.float32).tobytes(),
     }
-    return meta, fields
 
 
-def collect_models(scene) -> List[Tuple[Dict[str, Any], Dict[str, bytes]]]:
-    return [serialize(model, model_id)
-            for model_id, model, _ in iter_scene_models(scene)]
+def describe(pairs, known_geoms) -> Tuple[List[Dict[str, Any]],
+                                          List[Tuple[Dict[str, Any],
+                                                     Dict[str, bytes]]]]:
+    """(model_id, model) pairs -> the entries a message carries.
+
+    ``known_geoms`` is the set of geometry ids the far end already holds; it is
+    updated here, so each geometry is serialized once per connection.
+    """
+    models, geometries = [], []
+    for model_id, model in pairs:
+        entry = model_entry(model, model_id)
+        models.append(entry)
+        if entry['geom'] not in known_geoms:
+            known_geoms.add(entry['geom'])
+            geometries.append(geometry_entry(model))
+    return models, geometries
 
 
 # ---------------------------------------------------------------- messages
 
-def scene_message(msg_type, models, camera=None, remove=None) -> bytes:
-    """``scene_init`` or ``scene_delta`` -- models plus, for a delta, the ids
-    that went away."""
+def scene_message(msg_type, models, geometries,
+                  camera=None, remove=None) -> bytes:
+    """``scene_init`` or ``scene_delta``: any geometry the far end is missing,
+    the models that reference it, and (for a delta) the ids that went away."""
     blob = _Blob()
-    entries = []
-    for meta, fields in models:
+    geometry_entries = []
+    for meta, fields in geometries:
         entry = dict(meta)
         for name, raw in fields.items():
             entry[name] = blob.add_raw(raw, ARRAY_FIELDS[name])
-        entries.append(entry)
-    header = {'type': msg_type, 'models': entries}
+        geometry_entries.append(entry)
+    header = {'type': msg_type, 'geometries': geometry_entries,
+              'models': list(models)}
     if camera is not None:
         header['camera'] = camera
     if remove is not None:
@@ -176,30 +217,11 @@ def scene_message(msg_type, models, camera=None, remove=None) -> bytes:
     return pack(header, blob.parts)
 
 
-def transform_message(scene) -> bytes:
-    """Every model's matrix for this frame: ids in the header, matrices in one
-    contiguous float32 run of 16 per id."""
-    ids = []
-    mats = []
-    for model_id, model, sobj in iter_scene_models(scene):
-        ids.append(model_id)
-        mats.append((sobj.tf @ model.loc_tf).T)   # as render.py did
-    blob = _Blob()
-    stacked = (np.asarray(mats, dtype=np.float32).reshape(-1)
-               if mats else np.empty(0, np.float32))
-    ref = blob.add(stacked, np.float32)
-    return pack({'type': 'scene_update', 'ids': ids, 'matrices': ref},
-                blob.parts)
-
-
-def split_models(header, blob) -> List[Tuple[Dict[str, Any], Dict[str, bytes]]]:
-    """Frame -> the (metadata, {field: bytes}) pairs :func:`serialize` makes.
-
-    Lets the hub keep a scene it never has to interpret: it slices the blob per
-    model and can re-frame those slices for the next viewer verbatim.
-    """
+def split_geometries(header, blob) -> List[Tuple[Dict[str, Any],
+                                                 Dict[str, bytes]]]:
+    """Frame -> the (metadata, {field: bytes}) pairs geometry_entry makes."""
     out = []
-    for entry in header.get('models', []):
+    for entry in header.get('geometries', []):
         meta = {k: v for k, v in entry.items() if k not in ARRAY_FIELDS}
         fields = {}
         for name in ARRAY_FIELDS:
@@ -210,3 +232,42 @@ def split_models(header, blob) -> List[Tuple[Dict[str, Any], Dict[str, bytes]]]:
             fields[name] = bytes(blob[ref['off']:ref['off'] + size])
         out.append((meta, fields))
     return out
+
+
+def transform_arrays(snapshot) -> Tuple[List[str], np.ndarray]:
+    """A snapshot as (ids, (N, 16) float32) -- one column-major matrix a row.
+
+    Split out from the message so the caller can diff against the previous
+    frame: a scene is mostly furniture, and re-sending every matrix at 30 Hz
+    costs more than the whole rest of the viewer put together.
+    """
+    ids = []
+    mats = np.empty((len(snapshot), 16), dtype=np.float32)
+    for i, (model_id, model, sobj) in enumerate(snapshot):
+        ids.append(model_id)
+        mats[i] = (sobj.tf @ model.loc_tf).T.reshape(16)   # as render.py did
+    return ids, mats
+
+
+MATRIX_BYTES = 64          # 16 float32
+
+
+def transform_message(ids, matrices) -> bytes:
+    """Poses for the ids given: ids in the header, matrices in one contiguous
+    float32 run of 16 per id.  A partial set is fine -- the page applies what
+    it is sent and leaves the rest alone."""
+    raw = (matrices if isinstance(matrices, bytes)
+           else np.ascontiguousarray(matrices, np.float32).reshape(-1).tobytes())
+    blob = _Blob()
+    ref = blob.add_raw(raw, np.float32)
+    return pack({'type': 'scene_update', 'ids': list(ids), 'matrices': ref},
+                blob.parts)
+
+
+def split_transforms(header, blob):
+    """A pose frame -> {id: raw 64 bytes}, for a cache that has to survive
+    partial updates."""
+    off = header['matrices']['off']
+    return {model_id: bytes(blob[off + i * MATRIX_BYTES:
+                                 off + (i + 1) * MATRIX_BYTES])
+            for i, model_id in enumerate(header['ids'])}

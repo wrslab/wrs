@@ -25,12 +25,12 @@ import sys
 import threading
 import time
 
+import numpy as np
 import websockets
 
 import wrs.scene.scene as wss
 import wrs.viewer.key as wvk
 import wrs.viewer.protocol as wvp
-from wrs.viewer.server import DEFAULT_PORT
 from wrs.utils.scheduler import Scheduler
 
 _HUB_BOOT_TIMEOUT = 10.0
@@ -43,7 +43,7 @@ class World:
                  cam_pos=(.1, .1, .1),
                  cam_lookat_pos=(0, 0, 0),
                  toggle_auto_cam_orbit=False,
-                 host='127.0.0.1', port=DEFAULT_PORT, hz=30,
+                 host='127.0.0.1', port=wvp.DEFAULT_PORT, hz=30,
                  tick_hz=60,
                  auto_start_hub=True):
         self.scene = wss.Scene()
@@ -120,10 +120,12 @@ class World:
         self._closed = True
 
     def run(self):
-        """Publish the scene and tick scheduled callbacks until Ctrl-C.
+        """Publish the scene and tick scheduled callbacks.
 
-        The publisher thread samples ``self.scene`` on its own clock, so this
-        loop only advances the script's own callbacks and drains page events.
+        Returns on Ctrl-C, on close(), or when another script takes the page
+        over -- there is no viewer left to run for at that point.  The
+        publisher thread samples ``self.scene`` on its own clock, so this loop
+        only advances the script's own callbacks and drains page events.
         """
         if not self._publishing:
             self._ensure_hub()
@@ -210,21 +212,42 @@ class World:
                 async with websockets.connect(url, max_size=None) as ws:
                     complained = None
                     await self._publish(ws)
+            except websockets.ConnectionClosed as exc:
+                if exc.rcvd is not None and exc.rcvd.code == wvp.SUPERSEDED:
+                    # run() is the viewer loop, and this script no longer has
+                    # a viewer.  Ending it beats leaving a process burning CPU
+                    # on a scene nobody can see and nobody remembers starting.
+                    print('viewer: another script took over the page; '
+                          'stopping this one', file=sys.stderr, flush=True)
+                    self._closed = True
+                    return
+                complained = self._complain(url, exc, complained)
+                await asyncio.sleep(0.5)
             except (OSError, websockets.WebSocketException) as exc:
-                # Retrying silently would leave the page showing a stale scene
-                # with nothing to explain it, so say it once -- and again only
-                # if the reason changes.
-                reason = f'{type(exc).__name__}: {exc}'
-                if reason != complained:
-                    print(f'viewer: publish to {url} failed -- {reason}',
-                          file=sys.stderr, flush=True)
-                    complained = reason
+                complained = self._complain(url, exc, complained)
                 await asyncio.sleep(0.5)   # hub restarting, or not up yet
 
+    @staticmethod
+    def _complain(url, exc, last):
+        """Report a publish failure once, and again only if it changes.
+
+        Retrying silently would leave the page showing a stale scene with
+        nothing anywhere to explain it."""
+        reason = f'{type(exc).__name__}: {exc}'
+        if reason != last:
+            print(f'viewer: publish to {url} failed -- {reason}',
+                  file=sys.stderr, flush=True)
+        return reason
+
     async def _publish(self, ws):
-        models = wvp.collect_models(self.scene)
+        # Which geometries this connection already holds.  Reset per connect:
+        # a reconnect means the far end starts empty again.
+        sent_geoms = set()
+        snapshot = list(wvp.iter_scene_models(self.scene))
+        models, geometries = wvp.describe(
+            [(model_id, model) for model_id, model, _ in snapshot], sent_geoms)
         await ws.send(wvp.scene_message(
-            'scene_init', models,
+            'scene_init', models, geometries,
             # The page keeps whatever camera the user last dragged to and only
             # takes these on its first connect, so a rerun does not yank the
             # viewpoint back to the default.
@@ -233,37 +256,58 @@ class World:
                 'look_at': list(self.cam_lookat_pos),
                 'auto_orbit': bool(self.toggle_auto_cam_orbit),
             }))
-        live = {meta['id'] for meta, _ in models}
+        live = {entry['id'] for entry in models}
         # Scene out, events in -- concurrently, so a held key does not wait on
         # the next frame and a slow frame does not swallow a keystroke.
-        await asyncio.gather(self._send_scene(ws, live),
+        await asyncio.gather(self._send_scene(ws, live, sent_geoms),
                              self._recv_events(ws))
 
-    async def _send_scene(self, ws, live):
+    async def _send_scene(self, ws, live, sent_geoms):
         interval = 1.0 / self._hz
         sent_caption = None
+        prev_ids, prev_mats = None, None
         while not self._closed:
-            # Diff the id set before streaming transforms, so an object added
-            # or removed after run() reaches the page instead of being visible
-            # only to whoever connects next.  Rebuilding the ids is the same
-            # walk collect_transforms already does, so this costs one extra
-            # pass, not one extra serialization.
-            current = dict((model_id, model) for model_id, model, _
-                           in wvp.iter_scene_models(self.scene))
+            started = time.monotonic()
+            # One walk per frame, shared by the delta and the poses.  The
+            # scene belongs to the main thread and can change under us, so
+            # sampling it twice would announce one set of objects and send
+            # matrices for another -- the newcomers would then sit at identity
+            # (piled on the origin) until a frame happened to line up.
+            snapshot = list(wvp.iter_scene_models(self.scene))
+            current = {model_id: model for model_id, model, _ in snapshot}
             added = [mid for mid in current if mid not in live]
             removed = [mid for mid in live if mid not in current]
             if added or removed:
+                models, geometries = wvp.describe(
+                    [(mid, current[mid]) for mid in added], sent_geoms)
                 await ws.send(wvp.scene_message(
-                    'scene_delta',
-                    [wvp.serialize(current[mid], mid) for mid in added],
-                    remove=removed))
+                    'scene_delta', models, geometries, remove=removed))
                 live = set(current)
+                prev_ids = None            # the id list moved; resend it all
             if self.caption != sent_caption:
                 sent_caption = self.caption
                 await ws.send(json.dumps(
                     {'type': 'caption', 'text': sent_caption}))
-            await ws.send(wvp.transform_message(self.scene))
-            await asyncio.sleep(interval)
+
+            # Send only what moved.  Most of a scene is furniture -- an IK
+            # sweep leaves 74k poses untouched forever -- and re-sending every
+            # matrix at 30 Hz costs more than the whole rest of the viewer.
+            ids, mats = wvp.transform_arrays(snapshot)
+            if prev_ids == ids and prev_mats is not None:
+                moved = np.flatnonzero(np.any(mats != prev_mats, axis=1))
+                if moved.size:
+                    await ws.send(wvp.transform_message(
+                        [ids[i] for i in moved], mats[moved]))
+            else:
+                await ws.send(wvp.transform_message(ids, mats))
+            prev_ids, prev_mats = ids, mats
+
+            # Pace by what the frame actually cost.  A scene big enough that
+            # one pass takes longer than the interval would otherwise spin
+            # flat out, starving the script's own callbacks of the GIL and
+            # leaving no room to answer the hub's keepalive pings.
+            elapsed = time.monotonic() - started
+            await asyncio.sleep(max(interval, elapsed))
 
     async def _recv_events(self, ws):
         """Page -> script.  Key names arrive as JS KeyboardEvent strings, which

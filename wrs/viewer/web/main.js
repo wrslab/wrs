@@ -10,7 +10,7 @@
 import { Camera } from './camera.js';
 import { InputManager } from './input_manager.js';
 import { Renderer } from './renderer.js';
-import { decode, readModel } from './wire.js';
+import { decode, readGeometry } from './wire.js';
 
 const BACKGROUND = 0xf2f2f0;
 const ORBIT_DEG_PER_SEC = 0.5;
@@ -77,11 +77,14 @@ function connect(renderer) {
       // and leaks its buffers.
       renderer.clear();
       applyCamera(header.camera);
-      header.models.forEach((e) => renderer.add(readModel(e, view)));
+      // geometry first: a model is only a pose and a colour over one
+      header.geometries.forEach((g) => renderer.addGeometry(readGeometry(g, view)));
+      header.models.forEach((e) => renderer.add(e));
     } else if (header.type === 'scene_delta') {
       // objects added to or removed from the scene after run()
       (header.remove || []).forEach((id) => renderer.remove(id));
-      header.models.forEach((e) => renderer.add(readModel(e, view)));
+      header.geometries.forEach((g) => renderer.addGeometry(readGeometry(g, view)));
+      header.models.forEach((e) => renderer.add(e));
     } else if (header.type === 'scene_update') {
       const matrices = view(header.matrices, Float32Array);
       header.ids.forEach((id, i) => renderer.setTransform(

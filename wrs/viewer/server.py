@@ -28,31 +28,70 @@ from websockets.http11 import Response
 from websockets.datastructures import Headers
 
 import wrs.viewer.protocol as wvp
+from wrs.viewer.protocol import DEFAULT_PORT
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
-DEFAULT_PORT = 8000
+
+# Seconds with no page and no script before the hub gives up.  Long enough to
+# ride out a page reload, which drops the only viewer for about a second.
+IDLE_TIMEOUT = 30.0
 
 
 class Hub:
     """Fan-out from one publisher to any number of viewers."""
 
-    def __init__(self):
+    def __init__(self, idle_timeout=IDLE_TIMEOUT):
         self.viewers = set()
         self.publisher = None
+        self.idle_timeout = idle_timeout
+        # Nothing has connected yet, so being empty is not yet idle: a hub
+        # started by hand should wait for its first client, however long that
+        # takes.  Only losing the last one starts the clock.
+        self.seen_client = False
+        self.stop = asyncio.Event()
         # The scene as last published, kept so a browser opening mid-run gets
         # the whole thing rather than only the deltas from here on.
         self.models = {}
+        # geometry id -> (meta, {field: bytes}); models only name these, so a
+        # scene of clones keeps one copy however many use it
+        self.geoms = {}
         self.camera = None
         self.caption = None
+        # id -> its latest matrix, accumulated: a page that opens (or
+        # reloads) after the script exits would otherwise draw every model at
+        # identity, all its links piled on the origin.  Accumulated rather
+        # than kept as one frame because the publisher sends only what moved.
+        self.transforms = {}
 
     # ------------------------------------------------------------- publisher
 
+    async def watch_idle(self):
+        """Shut down once the page and the script are both gone."""
+        if not self.idle_timeout:
+            return
+        idle_for = 0.0
+        while True:
+            await asyncio.sleep(1.0)
+            if self.viewers or self.publisher is not None or not self.seen_client:
+                idle_for = 0.0
+                continue
+            idle_for += 1.0
+            if idle_for >= self.idle_timeout:
+                print(f'no page and no script for {self.idle_timeout:.0f}s; '
+                      f'stopping', flush=True)
+                self.stop.set()
+                return
+
     async def on_publish(self, websocket):
         # A new script takes over; the old one is dropped rather than
-        # interleaved, which is what a rerun means.
+        # interleaved, which is what a rerun means.  The close code matters:
+        # the displaced script reconnects on its own, so without a signal that
+        # it has been replaced the two would kick each other out forever.
         if self.publisher is not None:
-            await self.publisher.close()
+            await self.publisher.close(
+                wvp.SUPERSEDED, 'another script took over')
         self.publisher = websocket
+        self.seen_client = True
         await self._tell_viewers_status(True)
         try:
             async for message in websocket:
@@ -78,23 +117,38 @@ class Hub:
             header, blob = wvp.unpack(message)
             kind = header.get("type")
             if kind == "scene_init":
-                self.models = {meta["id"]: (meta, fields) for meta, fields
-                               in wvp.split_models(header, blob)}
+                self.models = {e["id"]: e for e in header["models"]}
+                self.geoms = {meta["id"]: (meta, fields) for meta, fields
+                              in wvp.split_geometries(header, blob)}
                 self.camera = header.get("camera")
+                self.transforms = {}        # belongs to the publisher that left
+            elif kind == "scene_update":
+                self.transforms.update(wvp.split_transforms(header, blob))
             elif kind == "scene_delta":
                 for model_id in header.get("remove", []):
                     self.models.pop(model_id, None)
-                for meta, fields in wvp.split_models(header, blob):
-                    self.models[meta["id"]] = (meta, fields)
+                for entry in header["models"]:
+                    self.models[entry["id"]] = entry
+                for meta, fields in wvp.split_geometries(header, blob):
+                    self.geoms[meta["id"]] = (meta, fields)
         await self._broadcast(message)
 
     # --------------------------------------------------------------- viewers
 
     async def on_view(self, websocket):
         self.viewers.add(websocket)
+        self.seen_client = True
         try:
+            models = list(self.models.values())
+            used = {entry["geom"] for entry in models}
             await websocket.send(wvp.scene_message(
-                "scene_init", list(self.models.values()), camera=self.camera))
+                "scene_init", models,
+                [self.geoms[g] for g in used if g in self.geoms],
+                camera=self.camera))
+            if self.transforms:
+                ids = list(self.transforms)
+                await websocket.send(wvp.transform_message(
+                    ids, b"".join(self.transforms[i] for i in ids)))
             await websocket.send(json.dumps({
                 "type": "status", "publisher": self.publisher is not None}))
             if self.caption is not None:
@@ -146,8 +200,9 @@ def _static_response(path):
     }), body)
 
 
-async def serve(host='127.0.0.1', port=DEFAULT_PORT):
-    hub = Hub()
+async def serve(host='127.0.0.1', port=DEFAULT_PORT,
+                idle_timeout=IDLE_TIMEOUT):
+    hub = Hub(idle_timeout)
 
     async def router(websocket):
         if websocket.request.path.rstrip('/') == '/publish':
@@ -167,7 +222,9 @@ async def serve(host='127.0.0.1', port=DEFAULT_PORT):
     # whatever it had before, with nothing logged anywhere.
     async with websockets.serve(router, host, port, max_size=None,
                                 process_request=process_request):
-        await asyncio.Future()   # run forever
+        watcher = asyncio.create_task(hub.watch_idle())
+        await hub.stop.wait()
+        watcher.cancel()
 
 
 def main():
@@ -176,14 +233,19 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--open', action='store_true',
                     help='open the page in a browser once the hub is up')
+    ap.add_argument('--idle-timeout', type=float, default=IDLE_TIMEOUT,
+                    help='seconds with no page and no script before stopping; '
+                         '0 to stay up forever')
     args = ap.parse_args()
     url = f'http://{args.host}:{args.port}/'
-    print(f'wrs viewer hub on {url}\n  serving {WEB_DIR}\n'
-          f'  leave this running; Ctrl-C to stop', flush=True)
+    idle = (f'stops {args.idle_timeout:.0f}s after the last page and script go'
+            if args.idle_timeout else 'stays up until Ctrl-C')
+    print(f'wrs viewer hub on {url}\n  serving {WEB_DIR}\n  {idle}',
+          flush=True)
     if args.open:
         webbrowser.open(url)
     try:
-        asyncio.run(serve(args.host, args.port))
+        asyncio.run(serve(args.host, args.port, args.idle_timeout))
     except KeyboardInterrupt:
         print('\nstopped')
 
