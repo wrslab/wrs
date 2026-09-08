@@ -1,1 +1,1 @@
-# The Workman Robot Simulator
+# The Workman Robot System (WRS)

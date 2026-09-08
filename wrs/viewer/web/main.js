@@ -66,7 +66,9 @@ function connect(renderer) {
         // the hub is still here; it is the script that comes and goes
         setStatus(payload.publisher ? null : 'no script publishing');
       } else if (payload.type === 'caption') {
-        document.title = payload.text || 'wrs viewer';
+        // a script's set_caption takes the tab over; falling back to
+        // the product name when it clears the caption
+        document.title = payload.text || 'The Workman Robot System (WRS)';
       }
       return;
     }
