@@ -45,13 +45,46 @@ new InputManager(camera, canvas, {
 
 // Only the first script of the session aims the camera.  After that the
 // viewpoint is yours, and a restart must not snatch it back.
-let cameraPlaced = false;
 let autoOrbit = false;
-function applyCamera(cam) {
-  if (!cam || cameraPlaced) return;
-  cameraPlaced = true;
+let haveStoredView = false;
+
+// The viewpoint survives a page reload.  The page is the host and outlives
+// every script, so having F5 throw the view away is the one place that
+// promise visibly breaks.
+const VIEW_KEY = 'wrs.viewer.view';
+
+function saveView() {
+  try {
+    window.localStorage.setItem(VIEW_KEY, JSON.stringify({
+      pos: camera.pos, lookAt: camera.lookAt, up: camera.up, autoOrbit,
+    }));
+  } catch (err) { /* private window, or storage disabled */ }
+}
+
+function restoreView() {
+  let stored = null;
+  try {
+    stored = JSON.parse(window.localStorage.getItem(VIEW_KEY) || 'null');
+  } catch (err) { return; }
+  if (!stored || !stored.pos) return;
+  camera.pos = stored.pos;
+  camera.lookAt = stored.lookAt;
+  if (stored.up) camera.up = stored.up;
+  autoOrbit = Boolean(stored.autoOrbit);
+  haveStoredView = true;
+}
+
+/**
+ * A script that publishes -- started, rerun, or taking over -- gets the
+ * camera it asked for.  The hub's catch-up for a page that just (re)connected
+ * is flagged as a replay and leaves the stored viewpoint alone.
+ */
+function applyCamera(cam, replayed) {
+  if (!cam || (replayed && haveStoredView)) return;
   camera.setTo(cam.pos, cam.look_at);
   autoOrbit = Boolean(cam.auto_orbit);
+  haveStoredView = true;
+  saveView();
 }
 
 function connect(renderer) {
@@ -78,7 +111,7 @@ function connect(renderer) {
       // set; without clearing, every rerun piles another copy into the scene
       // and leaks its buffers.
       renderer.clear();
-      applyCamera(header.camera);
+      applyCamera(header.camera, header.replay);
       // geometry first: a model is only a pose and a colour over one
       header.geometries.forEach((g) => renderer.addGeometry(readGeometry(g, view)));
       header.models.forEach((e) => renderer.add(e));
@@ -114,6 +147,11 @@ async function main() {
     })));
   const renderer = await Renderer.create(canvas, shaders, BACKGROUND);
 
+  // Before connecting: the first scene_init must already know whether a
+  // stored viewpoint exists, or a replay would overwrite it.
+  restoreView();
+  window.addEventListener('beforeunload', saveView);
+
   setStatus('connecting ...');
   connect(renderer);
 
@@ -123,11 +161,13 @@ async function main() {
 
   // World(toggle_auto_cam_orbit=True) spins the view slowly about +Z, at the
   // 0.5 deg/s the native viewer used.  A drag still works; it just adds on top.
+  let lastSave = 0;
   let last = performance.now();
   const frame = (now) => {
     const dt = (now - last) / 1000;
     last = now;
     if (autoOrbit) camera.orbit([0, 0, 1], ORBIT_DEG_PER_SEC * dt * DEG);
+    if (now - lastSave > 1000) { lastSave = now; saveView(); }
     renderer.render(camera);
     requestAnimationFrame(frame);
   };

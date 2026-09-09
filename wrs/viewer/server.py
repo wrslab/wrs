@@ -19,8 +19,10 @@ or just run a script -- ``World`` starts one if the port is idle.
 import argparse
 import asyncio
 import json
+import logging
 import mimetypes
 import os
+import time
 import webbrowser
 
 import websockets
@@ -40,7 +42,12 @@ IDLE_TIMEOUT = 30.0
 class Hub:
     """Fan-out from one publisher to any number of viewers."""
 
-    def __init__(self, idle_timeout=IDLE_TIMEOUT):
+    def __init__(self, idle_timeout=IDLE_TIMEOUT, url=None, auto_open=True):
+        self.url = url
+        self.auto_open = auto_open
+        # Set while a browser we launched is still starting up, so a slow
+        # launch does not get a second window on the next publish.
+        self._opening = False
         self.viewers = set()
         self.publisher = None
         self.idle_timeout = idle_timeout
@@ -64,6 +71,19 @@ class Hub:
         self.transforms = {}
 
     # ------------------------------------------------------------- publisher
+
+    def _open_page_if_unwatched(self):
+        """A script publishing to nobody means the page is missing; open one.
+
+        This is what makes the two-client split invisible: you run a script,
+        and the view is there.  Nothing happens when a page is already open,
+        so rerunning does not pile up windows.
+        """
+        if not self.auto_open or self.viewers or self._opening or not self.url:
+            return
+        self._opening = True
+        print(f'no page open; launching {self.url}', flush=True)
+        webbrowser.open(self.url)
 
     async def watch_idle(self):
         """Shut down once the page and the script are both gone."""
@@ -92,6 +112,7 @@ class Hub:
                 wvp.SUPERSEDED, 'another script took over')
         self.publisher = websocket
         self.seen_client = True
+        self._open_page_if_unwatched()
         await self._tell_viewers_status(True)
         try:
             async for message in websocket:
@@ -138,13 +159,14 @@ class Hub:
     async def on_view(self, websocket):
         self.viewers.add(websocket)
         self.seen_client = True
+        self._opening = False
         try:
             models = list(self.models.values())
             used = {entry["geom"] for entry in models}
             await websocket.send(wvp.scene_message(
                 "scene_init", models,
                 [self.geoms[g] for g in used if g in self.geoms],
-                camera=self.camera))
+                camera=self.camera, replay=True))
             if self.transforms:
                 ids = list(self.transforms)
                 await websocket.send(wvp.transform_message(
@@ -200,9 +222,24 @@ def _static_response(path):
     }), body)
 
 
+class _QuietHandshakes(logging.Filter):
+    """Drop the traceback a probe connection leaves behind.
+
+    Browsers speculatively open and drop sockets, and so does anything that
+    scans the port.  websockets logs each one as a failed opening handshake,
+    with a full traceback, from inside its own accept loop -- before any of
+    our code runs, so there is nothing to catch.  Left alone it buries the
+    errors that do matter.
+    """
+
+    def filter(self, record):
+        return 'opening handshake failed' not in record.getMessage()
+
+
 async def serve(host='127.0.0.1', port=DEFAULT_PORT,
-                idle_timeout=IDLE_TIMEOUT):
-    hub = Hub(idle_timeout)
+                idle_timeout=IDLE_TIMEOUT, auto_open=True):
+    logging.getLogger('websockets.server').addFilter(_QuietHandshakes())
+    hub = Hub(idle_timeout, url=f'http://{host}:{port}/', auto_open=auto_open)
 
     async def router(websocket):
         if websocket.request.path.rstrip('/') == '/publish':
@@ -231,8 +268,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--port', type=int, default=DEFAULT_PORT)
     ap.add_argument('--host', default='127.0.0.1')
-    ap.add_argument('--open', action='store_true',
-                    help='open the page in a browser once the hub is up')
+    ap.add_argument('--no-browser', action='store_true',
+                    help='never launch a browser, even with no page open')
     ap.add_argument('--idle-timeout', type=float, default=IDLE_TIMEOUT,
                     help='seconds with no page and no script before stopping; '
                          '0 to stay up forever')
@@ -242,10 +279,9 @@ def main():
             if args.idle_timeout else 'stays up until Ctrl-C')
     print(f'wrs viewer hub on {url}\n  serving {WEB_DIR}\n  {idle}',
           flush=True)
-    if args.open:
-        webbrowser.open(url)
     try:
-        asyncio.run(serve(args.host, args.port, args.idle_timeout))
+        asyncio.run(serve(args.host, args.port, args.idle_timeout,
+                          auto_open=not args.no_browser))
     except KeyboardInterrupt:
         print('\nstopped')
 

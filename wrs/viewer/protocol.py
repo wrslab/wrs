@@ -198,9 +198,15 @@ def describe(pairs, known_geoms) -> Tuple[List[Dict[str, Any]],
 # ---------------------------------------------------------------- messages
 
 def scene_message(msg_type, models, geometries,
-                  camera=None, remove=None) -> bytes:
+                  camera=None, remove=None, replay=False) -> bytes:
     """``scene_init`` or ``scene_delta``: any geometry the far end is missing,
-    the models that reference it, and (for a delta) the ids that went away."""
+    the models that reference it, and (for a delta) the ids that went away.
+
+    ``replay`` marks the hub catching a newly connected page up on a scene
+    that was already running, as opposed to a script publishing a fresh one.
+    The page needs the difference: a reload should keep the viewpoint you
+    dragged to, while a script starting should get the camera it asked for.
+    """
     blob = _Blob()
     geometry_entries = []
     for meta, fields in geometries:
@@ -210,6 +216,8 @@ def scene_message(msg_type, models, geometries,
         geometry_entries.append(entry)
     header = {'type': msg_type, 'geometries': geometry_entries,
               'models': list(models)}
+    if replay:
+        header['replay'] = True
     if camera is not None:
         header['camera'] = camera
     if remove is not None:

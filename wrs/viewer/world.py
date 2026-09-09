@@ -182,11 +182,11 @@ class World:
             flags['start_new_session'] = True
         argv = [sys.executable, '-m', 'wrs.viewer.server',
                 '--host', self._host, '--port', str(self._port)]
-        # Opening a window is the right default -- the hub only starts when
-        # nothing was listening, so no page can be showing yet.  The escape
-        # hatch is for headless boxes and CI.
-        if not os.environ.get('WRS_VIEWER_NO_BROWSER'):
-            argv.append('--open')
+        # The hub opens a page itself when a script publishes and nobody is
+        # watching, so there is nothing to ask for here -- only to opt out of,
+        # for headless boxes and CI.
+        if os.environ.get('WRS_VIEWER_NO_BROWSER'):
+            argv.append('--no-browser')
         subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, **flags)
         deadline = time.time() + _HUB_BOOT_TIMEOUT
