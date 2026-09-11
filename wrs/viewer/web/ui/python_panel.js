@@ -1,5 +1,5 @@
 /** Bind Python-owned UI state to native panel components. */
-import { Button, Slider, Select, Text } from './controls.js';
+import { Button, Slider, Select, Checkbox, Text } from './controls.js';
 import { Panel } from './panel.js';
 
 export class UIPanel extends Panel {
@@ -135,6 +135,9 @@ export class UIPanel extends Panel {
     }
     if (control.kind === 'select') {
       return new Select({ ...control, onChange: value => this._commit(control.id, value) });
+    }
+    if (control.kind === 'checkbox') {
+      return new Checkbox({ ...control, onChange: value => this._commit(control.id, value) });
     }
     return new Text(control);
   }

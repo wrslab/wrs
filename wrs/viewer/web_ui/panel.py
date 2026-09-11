@@ -123,6 +123,12 @@ class UIPanel:
         """Add read-only text, updated with set_value()."""
         self._add(control_id, 'label', label, group, True, None, value=str(value))
 
+    def add_checkbox(self, control_id, *, value=False, label=None,
+                     on_change=None, group='', enabled=True):
+        """Add a checkbox; on_change receives a bool when toggled."""
+        self._add(control_id, 'checkbox', label, group, enabled, on_change,
+                  value=protocol.checkbox_value(value))
+
     def add_select(self, control_id, *, options, value=None, label=None,
                    on_change=None, group='', enabled=True):
         """Add a dropdown of strings; on_change receives the selected string."""
@@ -138,7 +144,7 @@ class UIPanel:
                   options=options, value=value)
 
     def set_value(self, control_id, value):
-        """Update a slider, select or label without invoking its callback.
+        """Update a slider, select, checkbox or label without invoking its callback.
 
         Raises KeyError for unknown IDs and ValueError for invalid values or
         buttons. Slider values use the same validation as browser events.
@@ -151,6 +157,8 @@ class UIPanel:
                 value = protocol.slider_value(control, value)
             elif control['kind'] == 'select':
                 value = protocol.select_value(control, value)
+            elif control['kind'] == 'checkbox':
+                value = protocol.checkbox_value(value)
             else:
                 value = str(value)
             if control['value'] != value:
@@ -218,7 +226,7 @@ class UIPanel:
                 if not control['enabled'] or control['kind'] == 'label':
                     raise ValueError('control does not accept input')
                 callback = self._callbacks[control_id]
-                if control['kind'] in ('slider', 'select'):
+                if control['kind'] in ('slider', 'select', 'checkbox'):
                     value = payload.get('value')
                     previous = control['value']
                     self.set_value(control_id, value)
@@ -227,7 +235,7 @@ class UIPanel:
                     raise ValueError('buttons do not accept a value')
             # Do not hold the snapshot lock while user code is running.
             if callback is not None:
-                if control['kind'] in ('slider', 'select'):
+                if control['kind'] in ('slider', 'select', 'checkbox'):
                     callback(value)
                 else:
                     callback()

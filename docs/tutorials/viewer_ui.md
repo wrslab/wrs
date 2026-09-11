@@ -1,6 +1,6 @@
 # Viewer controls
 
-Define buttons, sliders, dropdowns and read-only text from Python. Native HTML
+Define buttons, sliders, dropdowns, checkboxes and read-only text from Python. Native HTML
 and CSS draw the panels above the WebGPU canvas, without a frontend framework,
 external fonts or a build step.
 
@@ -14,7 +14,8 @@ python -m examples.viewer_ui
 
 The example opens three panels: six UR3 joint sliders at top left, a node
 selector with X/Y/Z controls at top right, and Workspace status at bottom left.
-The coordinate axes follow the selected node. Drag a panel heading to move it;
+The coordinate axes follow the selected node; toggle **Show coordinate axes**
+to hide or show them. Drag a panel heading to move it;
 close the joint/node panels with × and reopen them with **Show controls**.
 
 ## Python API
@@ -52,6 +53,7 @@ strings of up to 128 characters, unique within their panel. Empty panels stay hi
 | `add_button(id, label=..., on_click=...)` | Callback with no arguments |
 | `add_slider(id, ..., on_change=...)` | Callback with a float when the value is committed |
 | `add_select(id, options=[...], value=..., on_change=...)` | Callback with the selected string |
+| `add_checkbox(id, value=False, on_change=...)` | Callback with a bool when toggled |
 | `add_label(id, label=..., value=...)` | Read-only text |
 | `set_value(id, value)` | Update a value without invoking its callback |
 | `set_enabled(id, enabled)` | Enable or disable interaction |
@@ -59,6 +61,13 @@ strings of up to 128 characters, unique within their panel. Empty panels stay hi
 
 Controls accept `group` to start a visual section. Declare controls in the same
 group together. Slider units are display text; values are not converted.
+Checkbox values must be Python booleans (`True` or `False`). For example:
+
+```python
+panel.add_checkbox('axes', label='Show coordinate axes', value=True,
+                   on_change=lambda checked: print('Show axes:', checked))
+panel.set_value('axes', False)  # Uncheck without invoking the callback.
+```
 
 ## Panel layout
 
@@ -98,7 +107,7 @@ wrs/viewer/
     protocol.py       JSON message contract and value validation
   web/ui/
     index.js          browser exports
-    controls.js       Button, Slider, Select, Text
+    controls.js       Button, Slider, Select, Checkbox, Text
     panel.js          Panel layout, collapse, close and drag
     python_panel.js   Python state/event binding
     styles.css        shared appearance
@@ -140,5 +149,5 @@ separate from the binary scene protocol in `viewer.protocol`.
 
 Session IDs reject stale events when a script or panel is replaced. Disconnected
 controls are disabled, and actions are not replayed on reconnect. Callback errors
-appear in the panel and restore that slider/select value; other scene changes
+appear in the panel and restore that slider/select/checkbox value; other scene changes
 made by the callback are not rolled back.

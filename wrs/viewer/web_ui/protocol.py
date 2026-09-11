@@ -59,3 +59,10 @@ def select_value(control, value):
     if not isinstance(value, str) or value not in control['options']:
         raise ValueError('value must be one of the select options')
     return value
+
+
+def checkbox_value(value):
+    """Accept only booleans, including an explicit False for unchecked."""
+    if not isinstance(value, bool):
+        raise ValueError('checkbox value must be a bool')
+    return value

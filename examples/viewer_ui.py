@@ -1,4 +1,4 @@
-"""Three browser panels: UR3 joints, scene nodes and shared status."""
+"""Three browser panels: joints, scene nodes, an axes checkbox and status."""
 import numpy as np
 
 from wrs import wssop, wvw
@@ -75,8 +75,18 @@ def reset_position():
     status_panel.set_value('status', 'Home position restored')
 
 
+def show_axes(checked):
+    if checked:
+        selection_frame.add_to_scene(base.scene)
+    else:
+        selection_frame.remove_from_scene(base.scene)
+    status_panel.set_value('status', f'Coordinate axes {"shown" if checked else "hidden"}')
+
+
 node_panel.add_select('node', label='Selected node', options=list(nodes),
                        value=selected_node, on_change=select_node)
+node_panel.add_checkbox('show_axes', label='Show coordinate axes', value=True,
+                        on_change=show_axes)
 for axis, value in enumerate(block.pos):
     node_panel.add_slider(
         'xyz'[axis], label=f'{"XYZ"[axis]} position', unit='m',

@@ -160,6 +160,36 @@ export class Select extends Control {
   }
 }
 
+export class Checkbox extends Control {
+  constructor({ onChange = () => {}, ...props } = {}) {
+    super('checkbox', { value: false, ...props });
+    this.input = document.createElement('input');
+    this.input.type = 'checkbox';
+    this.input.id = `wrs-checkbox-${++nextControlId}`;
+    this.label = document.createElement('label');
+    this.label.htmlFor = this.input.id;
+    this.element.append(this.input, this.label);
+    this._listen(this.input, 'click', (event) => {
+      // Label clicks also activate the input while an earlier change is pending.
+      if (!this.control.enabled || this.pending) event.preventDefault();
+    });
+    this._listen(this.input, 'change', () => {
+      if (!this.control.enabled || this.pending) return;
+      this.control.value = this.input.checked;
+      onChange(this.control.value);
+    });
+    this._bindBusyGuard();
+    this.update();
+  }
+
+  update(props = {}) {
+    Object.assign(this.control, props);
+    this._updateInput();
+    this.label.textContent = this.control.label;
+    if (!this.pending) this.input.checked = this.control.value;
+  }
+}
+
 export class Text extends Control {
   constructor(props = {}) {
     super('label', { value: '', ...props });
