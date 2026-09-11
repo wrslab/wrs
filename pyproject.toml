@@ -17,6 +17,7 @@ dependencies = [
     'wgpu',
     'rendercanvas',
     'glfw',
+    'websockets>=14',
 ]
 
 [tool.setuptools.packages.find]

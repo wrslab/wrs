@@ -87,3 +87,17 @@ More examples live in [`examples/`](examples/). For the library itself, see
 [`docs/API_INDEX.md`](docs/API_INDEX.md) — a generated map of every public
 function, so in-house utilities are easy to find before reaching for an external
 one.
+
+## Interactive viewer controls
+
+Define buttons, sliders, dropdowns, and status text from Python with `base.ui`. Browser
+actions run callbacks in the World loop, and Python updates both the scene and
+the panels. Use `base.ui.add_panel()` for independently positioned panels with
+configurable sizes. The UI uses native HTML/CSS with no frontend dependencies.
+
+```
+py -3.12 examples/viewer_ui.py
+```
+
+See [Viewer controls](docs/tutorials/viewer_ui.md) for the API, lifecycle, and
+design notes.

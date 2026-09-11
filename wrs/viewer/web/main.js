@@ -9,6 +9,7 @@
  */
 import { Camera } from './camera.js';
 import { InputManager } from './input_manager.js';
+import { UIManager } from './ui/index.js';
 import { Renderer } from './renderer.js';
 import { decode, readGeometry } from './wire.js';
 
@@ -16,7 +17,7 @@ const BACKGROUND = 0xf2f2f0;
 const ORBIT_DEG_PER_SEC = 0.5;
 const DEG = Math.PI / 180;
 const SHADER_URLS = { mesh: './shaders/mesh.wgsl', pcd: './shaders/pcd.wgsl' };
-const SOCKET_URL = `ws://${window.location.host}/view`;
+const SOCKET_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/view`;
 
 const canvas = document.getElementById('app');
 const statusEl = document.createElement('div');
@@ -35,6 +36,11 @@ const camera = new Camera({ pos: [2, 2, 2], lookAt: [0, 0, 0] });
 // Set on every (re)connect, so keys reach whichever script is live now and
 // are quietly dropped while none is.
 let socket = null;
+const ui = new UIManager((message) => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(message));
+  return true;
+}, { container: document.body, anchor: 'top-right' });
 new InputManager(camera, canvas, {
   onEvent: (name, key) => {
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -96,8 +102,15 @@ function connect(renderer) {
     if (typeof event.data === 'string') {
       const payload = JSON.parse(event.data);
       if (payload.type === 'status') {
+        ui.setConnected(payload.publisher);
         // the hub is still here; it is the script that comes and goes
         setStatus(payload.publisher ? null : 'no script publishing');
+      } else if (payload.type === 'ui_state') {
+        ui.apply(payload);
+      } else if (payload.type === 'ui_result') {
+        ui.receiveResult(payload);
+      } else if (payload.type === 'ui_reset') {
+        ui.reset();
       } else if (payload.type === 'caption') {
         // a script's set_caption takes the tab over; falling back to
         // the product name when it clears the caption
@@ -128,6 +141,7 @@ function connect(renderer) {
   };
   ws.onerror = () => ws.close();
   ws.onclose = () => {
+    ui.setConnected(false);
     setStatus('viewer hub not reachable -- run a script, or ' +
               'py -3.12 -m wrs.viewer.server');
     setTimeout(() => connect(renderer), 500);
