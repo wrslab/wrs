@@ -64,6 +64,7 @@ class Hub:
         self.geoms = {}
         self.camera = None
         self.caption = None
+        self.ui_state = None
         # id -> its latest matrix, accumulated: a page that opens (or
         # reloads) after the script exits would otherwise draw every model at
         # identity, all its links piled on the origin.  Accumulated rather
@@ -111,11 +112,15 @@ class Hub:
             await self.publisher.close(
                 wvp.SUPERSEDED, 'another script took over')
         self.publisher = websocket
+        self.ui_state = None
+        await self._broadcast(json.dumps({'type': 'ui_reset'}))
         self.seen_client = True
         self._open_page_if_unwatched()
         await self._tell_viewers_status(True)
         try:
             async for message in websocket:
+                if self.publisher is not websocket:
+                    break
                 await self._relay(message)
         except websockets.ConnectionClosed:
             pass
@@ -134,6 +139,8 @@ class Hub:
             payload = json.loads(message)
             if payload.get("type") == "caption":
                 self.caption = payload.get("text")
+            elif payload.get('type') == 'ui_state':
+                self.ui_state = message
         else:
             header, blob = wvp.unpack(message)
             kind = header.get("type")
@@ -176,6 +183,8 @@ class Hub:
             if self.caption is not None:
                 await websocket.send(json.dumps(
                     {"type": "caption", "text": self.caption}))
+            if self.ui_state is not None:
+                await websocket.send(self.ui_state)
             async for message in websocket:
                 # events travel the other way: page -> script
                 if self.publisher is not None:

@@ -1,0 +1,179 @@
+/** Native controls: DOM and callbacks only, independent of the viewer transport. */
+let nextControlId = 0;
+
+class Control {
+  constructor(kind, props) {
+    this.element = document.createElement('div');
+    this.element.className = `ui-control ui-${kind}`;
+    this.control = { id: '', label: '', enabled: true, ...props, kind };
+    this.pending = false;
+    this.editing = false;
+    this._events = new AbortController();
+  }
+
+  _listen(element, event, callback) {
+    element.addEventListener(event, callback, { signal: this._events.signal });
+  }
+
+  _bindBusyGuard() {
+    this._listen(this.input, 'pointerdown', (event) => {
+      if (this.pending) event.preventDefault();
+    });
+    this._listen(this.input, 'keydown', (event) => {
+      if (this.pending && event.key !== 'Tab') event.preventDefault();
+    });
+  }
+
+  _updateInput() {
+    // aria-disabled preserves keyboard focus while a request is pending.
+    this.input.disabled = !this.control.enabled;
+    this.input.setAttribute('aria-disabled', String(this.input.disabled || this.pending));
+    this.input.setAttribute('aria-busy', String(this.pending));
+  }
+
+  destroy() {
+    this._panel?._children.delete(this);
+    this._panel = null;
+    this._events.abort();
+    this.element.remove();
+  }
+}
+
+export class Button extends Control {
+  constructor({ onClick = () => {}, ...props } = {}) {
+    super('button', props);
+    this.input = document.createElement('button');
+    this.input.type = 'button';
+    this.input.className = 'ui-action';
+    this.element.appendChild(this.input);
+    this._listen(this.input, 'click', () => {
+      if (this.control.enabled && !this.pending) onClick();
+    });
+    this._bindBusyGuard();
+    this.update();
+  }
+
+  update(props = {}) {
+    Object.assign(this.control, props);
+    this._updateInput();
+    this.input.textContent = this.pending ? `${this.control.label}…` : this.control.label;
+  }
+}
+
+export class Slider extends Control {
+  constructor({ onChange = () => {}, ...props } = {}) {
+    super('slider', { min: 0, max: 1, step: 0.01, value: 0, unit: '', ...props });
+    const top = document.createElement('div');
+    top.className = 'ui-slider-top';
+    this.label = document.createElement('label');
+    this.input = document.createElement('input');
+    this.input.type = 'range';
+    this.input.id = `wrs-slider-${++nextControlId}`;
+    this.label.htmlFor = this.input.id;
+    this.output = document.createElement('output');
+    this.output.htmlFor = this.input.id;
+    top.append(this.label, this.output);
+    const bounds = document.createElement('div');
+    bounds.className = 'ui-bounds';
+    this.min = document.createElement('span');
+    this.max = document.createElement('span');
+    bounds.append(this.min, this.max);
+    this.element.append(top, this.input, bounds);
+    this._listen(this.input, 'input', () => {
+      this.editing = true;
+      this._display(this.input.valueAsNumber);
+    });
+    this._listen(this.input, 'change', () => {
+      this.editing = false;
+      if (!this.control.enabled || this.pending) return;
+      this.control.value = this.input.valueAsNumber;
+      onChange(this.control.value);
+    });
+    this._listen(this.input, 'blur', () => {
+      this.editing = false;
+      this.update();
+    });
+    this._bindBusyGuard();
+    this.update();
+  }
+
+  update(props = {}) {
+    Object.assign(this.control, props);
+    const control = this.control;
+    if (!control.enabled) this.editing = false;
+    this._updateInput();
+    this.label.textContent = control.label;
+    this.input.min = control.min;
+    this.input.max = control.max;
+    this.input.step = control.step;
+    this.min.textContent = this._format(control.min);
+    this.max.textContent = this._format(control.max);
+    if (!this.editing && !this.pending) {
+      this.input.value = control.value;
+      this._display(this.input.valueAsNumber);
+    }
+  }
+
+  _format(value) {
+    return `${Number(value.toPrecision(8))}${this.control.unit ? ` ${this.control.unit}` : ''}`;
+  }
+
+  _display(value) {
+    this.output.textContent = this._format(value);
+    const percent = 100 * (value - this.control.min) / (this.control.max - this.control.min);
+    this.input.style.setProperty('--fill', `${percent}%`);
+    this.input.setAttribute('aria-valuetext', this.output.textContent);
+  }
+}
+
+export class Select extends Control {
+  constructor({ onChange = () => {}, ...props } = {}) {
+    super('select', { options: [], value: '', ...props });
+    this.label = document.createElement('label');
+    this.input = document.createElement('select');
+    this.input.id = `wrs-select-${++nextControlId}`;
+    this.label.htmlFor = this.input.id;
+    this.element.append(this.label, this.input);
+    this._listen(this.input, 'change', () => {
+      if (!this.control.enabled || this.pending) return;
+      this.control.value = this.input.value;
+      onChange(this.control.value);
+    });
+    this._bindBusyGuard();
+    this.update();
+  }
+
+  update(props = {}) {
+    Object.assign(this.control, props);
+    this._updateInput();
+    this.label.textContent = this.control.label;
+    const signature = JSON.stringify(this.control.options);
+    if (signature !== this.signature) {
+      this.signature = signature;
+      this.input.replaceChildren(...this.control.options.map(value => {
+        const option = document.createElement('option');
+        option.value = option.textContent = value;
+        return option;
+      }));
+    }
+    if (!this.pending) this.input.value = this.control.value;
+  }
+}
+
+export class Text extends Control {
+  constructor(props = {}) {
+    super('label', { value: '', ...props });
+    this.label = document.createElement('span');
+    this.label.className = 'ui-label-name';
+    this.output = document.createElement('span');
+    this.output.className = 'ui-label-value';
+    this.element.append(this.label, this.output);
+    this.update();
+  }
+
+  update(props = {}) {
+    Object.assign(this.control, props);
+    this.label.textContent = this.control.label;
+    this.output.textContent = this.control.value;
+  }
+}

@@ -32,6 +32,7 @@ import wrs.scene.scene as wss
 import wrs.viewer.key as wvk
 import wrs.viewer.protocol as wvp
 from wrs.utils.scheduler import Scheduler
+from wrs.viewer.web_ui import UIManager
 
 _HUB_BOOT_TIMEOUT = 10.0
 
@@ -47,6 +48,7 @@ class World:
                  tick_hz=60,
                  auto_start_hub=True):
         self.scene = wss.Scene()
+        self.ui = UIManager()
         self.cam_pos = tuple(float(v) for v in cam_pos)
         self.cam_lookat_pos = tuple(float(v) for v in cam_lookat_pos)
         self.toggle_auto_cam_orbit = toggle_auto_cam_orbit
@@ -64,6 +66,7 @@ class World:
         # on the main one, in run() -- the thread a native on_key_press would
         # have arrived on.
         self._events = queue.SimpleQueue()
+        self._ui_results = queue.SimpleQueue()
         self.pressed_keys = set()
         self._pending_presses = set()
 
@@ -152,6 +155,11 @@ class World:
                 name, args = self._events.get_nowait()
             except queue.Empty:
                 return
+            if name == 'ui_event':
+                result = self.ui._handle_event(args[0])
+                if result is not None:
+                    self._ui_results.put(result)
+                continue
             if name == 'on_key_press':
                 self.pressed_keys.add(args[0])
                 self._pending_presses.add(args[0])
@@ -260,7 +268,20 @@ class World:
         # Scene out, events in -- concurrently, so a held key does not wait on
         # the next frame and a slow frame does not swallow a keystroke.
         await asyncio.gather(self._send_scene(ws, live, sent_geoms),
-                             self._recv_events(ws))
+                             self._recv_events(ws), self._send_ui(ws))
+
+    async def _send_ui(self, ws):
+        revision = None
+        while not self._closed:
+            # Results include their authoritative snapshot. A later state may
+            # already exist; browser revisions prevent an old result reverting it.
+            while not self._ui_results.empty():
+                await ws.send(json.dumps(self._ui_results.get_nowait(), allow_nan=False))
+            state = self.ui._snapshot_all(revision)
+            if state is not None:
+                await ws.send(json.dumps(state, allow_nan=False))
+                revision = state['revision']
+            await asyncio.sleep(1.0 / self._hz)
 
     async def _send_scene(self, ws, live, sent_geoms):
         interval = 1.0 / self._hz
@@ -314,16 +335,26 @@ class World:
         is exactly what key.symbol_from_name expects, so the browser ships the
         raw name and the mapping stays in one place."""
         async for message in ws:
+            if not isinstance(message, str):
+                continue
             try:
                 payload = json.loads(message)
             except ValueError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get('type') == 'ui_event':
+                self._post_event('ui_event', (payload,))
                 continue
             if payload.get('type') != 'event':
                 continue
             name = payload.get('name')
             if name not in ('on_key_press', 'on_key_release'):
                 continue
-            symbol = wvk.symbol_from_name(payload.get('key', ''))
+            key_name = payload.get('key', '')
+            if not isinstance(key_name, str):
+                continue
+            symbol = wvk.symbol_from_name(key_name)
             if symbol is not None:
                 # modifiers is 0, as the native input manager also left it
                 self._post_event(name, (symbol, 0))

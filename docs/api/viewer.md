@@ -10,21 +10,54 @@ _Key symbols: ASCII for printable keys, X11 keysyms for the rest._
 ## `wrs.viewer.protocol`
 _Scene -> wire._
 
-- `serialize(model, model_id: str)`
+- `pack(header: Dict[str, Any], arrays: List[bytes])` — One binary frame from a header and the blobs its offsets refer to.
+- `unpack(frame: bytes)` — Inverse of :func:`pack`: the header and a view on the blob.
 - `iter_scene_models(scene)` — Walk the scene as (model_id, model, owner) -- no serialization.
-- `collect_models(scene)`
-- `collect_transforms(scene)`
+- `model_entry(model, model_id: str)` — A drawable with no arrays of its own: which geometry, and what colour.
+- `geometry_entry(model)` — That geometry's arrays, as (metadata, {field: raw bytes}).
+- `describe(pairs, known_geoms)` — (model_id, model) pairs -> the entries a message carries.
+- `scene_message(msg_type, models, geometries, camera=None, remove=None, replay=False)` — ``scene_init`` or ``scene_delta``: any geometry the far end is missing,
+- `split_geometries(header, blob)` — Frame -> the (metadata, {field: bytes}) pairs geometry_entry makes.
+- `transform_arrays(snapshot)` — A snapshot as (ids, (N, 16) float32) -- one column-major matrix a row.
+- `transform_message(ids, matrices)` — Poses for the ids given: ids in the header, matrices in one contiguous
+- `split_transforms(header, blob)` — A pose frame -> {id: raw 64 bytes}, for a cache that has to survive
 
 ## `wrs.viewer.server`
 _The hub: one long-lived process, one port, serving the page and relaying_
 
-- `serve(host='127.0.0.1', port=DEFAULT_PORT)`
+- `serve(host='127.0.0.1', port=DEFAULT_PORT, idle_timeout=IDLE_TIMEOUT, auto_open=True)`
 - `main()`
 - **class `Hub`** — Fan-out from one publisher to any number of viewers.
-  - methods: `on_publish`, `on_view`
+  - methods: `watch_idle`, `on_publish`, `on_view`
 
 ## `wrs.viewer.world`
 _The world a script builds its scene in, drawn by the browser page._
 
 - **class `World`** — Same surface as the old native World, minus the window.
-  - methods: `set_scene`, `set_caption`, `auto_cam_orbit`, `schedule_interval`, `schedule_once`, `schedule_interval_after`, `stop`, `stop_after`, `event`, `dispatch`, `is_key_pressed`, `close`, `run`, `post_event`
+  - methods: `set_scene`, `set_caption`, `schedule_interval`, `schedule_once`, `stop`, `stop_after`, `event`, `dispatch`, `is_key_pressed`, `is_key_pressed_edge`, `close`, `run`
+
+## `wrs.viewer.web_ui.constant`
+_Web UI constants, following wrs.utils.constant's class/member convention._
+
+- **class `Anchor`** — Panel placement; values remain strings in the browser protocol.
+
+## `wrs.viewer.web_ui.manager`
+_Named panels, a default panel and UI event routing._
+
+- **class `UIManager`** — World.ui: a default panel plus named panels with independent controls.
+  - methods: `add_panel`, `remove_panel`
+
+## `wrs.viewer.web_ui.panel`
+_One Python-owned panel: control state, snapshots and main-loop callbacks._
+
+- **class `UIPanel`** — Define a small control panel and publish immutable state snapshots.
+  - methods: `configure`, `show`, `hide`, `add_button`, `add_slider`, `add_label`, `add_select`, `set_value`, `set_enabled`, `remove`
+
+## `wrs.viewer.web_ui.protocol`
+_UI message contract and pure validation, without sockets, DOM or callbacks._
+
+- `valid_id(value)` — Whether a panel/control/event/session ID is a nonempty bounded string.
+- `is_ui_event(payload)` — Check the event envelope; the addressed panel validates its value.
+- `finite_number(value)` — Accept real finite numbers, excluding booleans and numeric strings.
+- `slider_value(control, value)` — Validate bounds and snap to the native range input's step lattice.
+- `select_value(control, value)` — Accept only one of the dropdown's string options.

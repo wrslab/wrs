@@ -40,6 +40,9 @@ export class InputManager {
     // Releasing a key while the page is not focused delivers no keyup, and
     // the script would hold that key forever.  Let go of everything instead.
     window.addEventListener('blur', () => this._releaseAll());
+    window.addEventListener('focusin', (e) => {
+      if (this._isControl(e.target)) this._releaseAll();
+    });
   }
 
   _releaseAll() {
@@ -58,12 +61,19 @@ export class InputManager {
    */
   _onKey(name, e) {
     if (e.repeat || !this.onEvent) return;
+    if (this._isControl(e.target)) return;
     if (name === 'on_key_press') this._held.add(e.key);
     else this._held.delete(e.key);
     this.onEvent(name, e.key);
   }
 
+  _isControl(target) {
+    return target instanceof Element && Boolean(target.closest(
+      '.wrs-ui-panel, input, textarea, select, button, [contenteditable]'));
+  }
+
   _onDown(e) {
+    this.domElement.focus({ preventScroll: true });
     this._buttons.add(e.button);
     this._lastX = e.clientX;
     this._lastY = e.clientY;

@@ -82,6 +82,7 @@ nav:
   - Tutorials:
       - Kinematics: tutorials/kinematics.md
       - Scene & Geometry: tutorials/scene_geometry.md
+      - Viewer Controls: tutorials/viewer_ui.md
       - Collision: tutorials/collision.md
       - Grasp Planning: tutorials/grasp_planning.md
       - Motion Planning: tutorials/motion_planning.md
