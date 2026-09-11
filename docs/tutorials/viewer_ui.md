@@ -17,6 +17,7 @@ selector with X/Y/Z controls at top right, and Workspace status at bottom left.
 The coordinate axes follow the selected node; toggle **Show coordinate axes**
 to hide or show them. Drag a panel heading to move it;
 close the joint/node panels with × and reopen them with **Show controls**.
+Joint and position sliders update the scene while dragging.
 
 ## Python API
 
@@ -68,6 +69,40 @@ panel.add_checkbox('axes', label='Show coordinate axes', value=True,
                    on_change=lambda checked: print('Show axes:', checked))
 panel.set_value('axes', False)  # Uncheck without invoking the callback.
 ```
+
+## Slider updates
+
+Sliders default to `continuous=False`: dragging previews the value in the browser,
+and releasing commits it to Python. Set `continuous=True` to run the same
+`on_change` callback during dragging too:
+
+```python
+panel.add_slider('live_x', label='X position', unit='m',
+                  min_value=-0.25, max_value=0.25, step=0.01,
+                  value=0, on_change=move_x, continuous=True, update_hz=30)
+```
+
+`update_hz` defaults to 30 and must be a positive finite number. It caps drag
+updates per slider; it is not a guaranteed callback rate. Each slider waits for
+its previous reply and keeps only the latest queued position. Release sends the
+final value without waiting for the rate limit, or as soon as the previous reply
+arrives. An already-sent, unchanged value is not sent again. Errors, timeouts,
+disconnects and control removal discard queued input.
+
+Browser-only `Slider` widgets accept the same `continuous` and `update_hz`
+options with their `onChange` callback.
+
+| Layer | Default behavior |
+| --- | --- |
+| Browser slider | Native input events update the local preview; continuous sends are capped by `update_hz` |
+| Python event loop | `World(tick_hz=60)` checks queued events about every 16.7 ms |
+| Scene and UI publishing | `World(hz=30)` checks for updates about every 33.3 ms and sends changed state; UI replies are also drained on this cycle |
+| Browser rendering | Uses `requestAnimationFrame`, independently of the network rates |
+
+The hub forwards messages as they arrive. Callback cost, network latency and
+publishing time can reduce the effective rate. `World(hz=60, tick_hz=60)` raises
+the publishing rate as well; a slider setting alone does not change it. These
+settings control polling intervals, not real-time deadlines.
 
 ## Panel layout
 
@@ -137,8 +172,8 @@ and its owned controls. Individual widgets can use `element.hidden`.
 
 ## State and callbacks
 
-Callbacks run on the `World.run()` thread. Dragging a slider previews locally;
-releasing it commits the value. Keep callbacks short. Python validates values
+Callbacks run on the `World.run()` thread. Sliders send on release, or also while
+dragging when `continuous=True`. Keep callbacks short. Python validates values
 and publishes the resulting state to all connected viewers.
 
 `web_ui.protocol` defines `ui_state` (a collection of panels), `ui_event`,

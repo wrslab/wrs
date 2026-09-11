@@ -15,19 +15,19 @@ class Control {
     element.addEventListener(event, callback, { signal: this._events.signal });
   }
 
-  _bindBusyGuard() {
+  _bindBusyGuard(allowPending = () => false) {
     this._listen(this.input, 'pointerdown', (event) => {
-      if (this.pending) event.preventDefault();
+      if (this.pending && !allowPending()) event.preventDefault();
     });
     this._listen(this.input, 'keydown', (event) => {
-      if (this.pending && event.key !== 'Tab') event.preventDefault();
+      if (this.pending && !allowPending() && event.key !== 'Tab') event.preventDefault();
     });
   }
 
-  _updateInput() {
+  _updateInput(allowPending = false) {
     // aria-disabled preserves keyboard focus while a request is pending.
     this.input.disabled = !this.control.enabled;
-    this.input.setAttribute('aria-disabled', String(this.input.disabled || this.pending));
+    this.input.setAttribute('aria-disabled', String(this.input.disabled || (this.pending && !allowPending)));
     this.input.setAttribute('aria-busy', String(this.pending));
   }
 
@@ -62,7 +62,10 @@ export class Button extends Control {
 
 export class Slider extends Control {
   constructor({ onChange = () => {}, ...props } = {}) {
-    super('slider', { min: 0, max: 1, step: 0.01, value: 0, unit: '', ...props });
+    super('slider', { min: 0, max: 1, step: 0.01, value: 0, unit: '',
+      continuous: false, update_hz: 30, ...props });
+    this._onChange = onChange;
+    this._lastEmitAt = -Infinity;
     const top = document.createElement('div');
     top.className = 'ui-slider-top';
     this.label = document.createElement('label');
@@ -80,38 +83,84 @@ export class Slider extends Control {
     bounds.append(this.min, this.max);
     this.element.append(top, this.input, bounds);
     this._listen(this.input, 'input', () => {
+      if (!this.control.enabled) return;
       this.editing = true;
       this._display(this.input.valueAsNumber);
+      if (this.control.continuous) this._queueValue(false);
     });
     this._listen(this.input, 'change', () => {
       this.editing = false;
-      if (!this.control.enabled || this.pending) return;
-      this.control.value = this.input.valueAsNumber;
-      onChange(this.control.value);
+      if (!this.control.enabled || (this.pending && !this.control.continuous)) return;
+      this._queueValue(true);
+      this.update();
     });
     this._listen(this.input, 'blur', () => {
       this.editing = false;
       this.update();
     });
-    this._bindBusyGuard();
+    this._bindBusyGuard(() => this.control.continuous);
     this.update();
   }
 
   update(props = {}) {
-    Object.assign(this.control, props);
-    const control = this.control;
-    if (!control.enabled) this.editing = false;
-    this._updateInput();
+    const next = { ...this.control, ...props };
+    if (typeof next.continuous !== 'boolean') throw new TypeError('continuous must be a boolean');
+    if (!Number.isFinite(next.update_hz) || next.update_hz <= 0) {
+      throw new RangeError('update_hz must be positive');
+    }
+    const control = Object.assign(this.control, next);
+    if (!control.enabled) this.cancelPending();
+    this._updateInput(control.continuous);
     this.label.textContent = control.label;
     this.input.min = control.min;
     this.input.max = control.max;
     this.input.step = control.step;
     this.min.textContent = this._format(control.min);
     this.max.textContent = this._format(control.max);
-    if (!this.editing && !this.pending) {
+    this._flushQueued();
+    if (!this.editing && !this.pending && this._queuedValue === undefined) {
       this.input.value = control.value;
       this._display(this.input.valueAsNumber);
     }
+  }
+
+  _queueValue(final) {
+    // Keep only the latest position while throttled or waiting for Python.
+    this._queuedValue = this.input.valueAsNumber;
+    this._flushImmediately = final;
+    this._flushQueued();
+  }
+
+  _flushQueued() {
+    clearTimeout(this._timer);
+    if (this._queuedValue === undefined || this.pending) return;
+    if (this._queuedValue === this.control.value) {
+      this._queuedValue = undefined;
+      return;
+    }
+    const delay = 1000 / this.control.update_hz - (performance.now() - this._lastEmitAt);
+    if (!this._flushImmediately && delay > 0) {
+      this._timer = setTimeout(() => this._flushQueued(), Math.min(delay, 2147483647));
+      return;
+    }
+    const value = this._queuedValue;
+    this._queuedValue = undefined;
+    this._flushImmediately = false;
+    this._lastEmitAt = performance.now();
+    this.control.value = value;
+    this._onChange(value);
+  }
+
+  cancelPending() {
+    clearTimeout(this._timer);
+    this._queuedValue = undefined;
+    this._flushImmediately = false;
+    this.editing = false;
+  }
+
+  destroy() {
+    this.cancelPending();
+    super.destroy();
   }
 
   _format(value) {

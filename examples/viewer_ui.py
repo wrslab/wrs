@@ -91,7 +91,7 @@ for axis, value in enumerate(block.pos):
     node_panel.add_slider(
         'xyz'[axis], label=f'{"XYZ"[axis]} position', unit='m',
         min_value=0 if axis == 2 else -0.5, max_value=0.6 if axis == 2 else 0.5,
-        step=0.01, value=float(value),
+        step=0.01, value=float(value), continuous=True, update_hz=30,
         on_change=lambda value, axis=axis: move_node(axis, value))
 node_panel.add_button('reset', label='Reset position', on_click=reset_position)
 node_panel.add_label('position', label='World position · X / Y / Z')
@@ -124,6 +124,7 @@ for joint, angle in enumerate(np.rad2deg(home_qs)):
     arm_panel.add_slider(
         f'joint_{joint + 1}', label=f'Joint {joint + 1}', unit='°',
         min_value=-180, max_value=180, step=1, value=round(float(angle)),
+        continuous=True, update_hz=30,
         on_change=lambda value, joint=joint: move_joint(joint, value))
 arm_panel.add_button('reset', label='Home pose', on_click=reset_joints)
 update_position()

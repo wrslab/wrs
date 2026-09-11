@@ -32,22 +32,18 @@
   flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px 10px;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--ui-line);
 }
-.wrs-ui-panel .ui-heading { min-width: 0; }
 .wrs-ui-panel .ui-header-actions { display: flex; flex-shrink: 0; gap: 4px; }
 .wrs-ui-panel .ui-header[data-movable='true'] { cursor: grab; touch-action: none; user-select: none; }
 .wrs-ui-panel .ui-header[data-dragging='true'] { cursor: grabbing; }
-.wrs-ui-panel .ui-eyebrow {
-  color: var(--ui-accent);
-  font-size: .77em;
-  font-weight: 650;
-  letter-spacing: .13em;
-}
 .wrs-ui-panel .ui-title {
-  margin: 4px 0 0;
-  font-size: 1.385em;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1.25em;
   line-height: 1.3;
   font-weight: 600;
   letter-spacing: -.025em;
@@ -60,12 +56,15 @@
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 1px solid var(--ui-line);
+  border: 1px solid transparent;
   border-radius: 7px;
   color: var(--ui-muted);
-  background: #fafbf9;
+  background: transparent;
 }
-.wrs-ui-panel .ui-collapse:hover, .wrs-ui-panel .ui-close:hover { background: #edf3ee; }
+.wrs-ui-panel .ui-collapse:hover, .wrs-ui-panel .ui-close:hover {
+  color: var(--ui-ink);
+  background: #edf3ee;
+}
 .wrs-ui-panel .ui-collapse[aria-expanded='false'] svg { transform: rotate(180deg); }
 .wrs-ui-panel .ui-description {
   margin: 0;
@@ -74,7 +73,13 @@
   font-size: .923em;
   overflow-wrap: anywhere;
 }
-.wrs-ui-panel .ui-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.wrs-ui-panel .ui-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .wrs-ui-panel .ui-controls { padding: 0 16px 2px; }
 .wrs-ui-panel .ui-group {
   margin: 6px 0 10px;

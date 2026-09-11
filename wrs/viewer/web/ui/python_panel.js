@@ -119,6 +119,7 @@ export class UIPanel extends Panel {
     if (!pending) return;  // Another browser's reply, or an expired request.
     clearTimeout(pending.timer);
     this.pending.delete(result.event_id);
+    if (!result.ok) pending.row.cancelPending?.();
     pending.row.pending = false;
     if (result.state) this.apply(result.state);
     this._updateRows();
@@ -168,6 +169,7 @@ export class UIPanel extends Panel {
     row.pending = true;
     const timer = setTimeout(() => {
       this.pending.delete(event_id);
+      row.cancelPending?.();
       row.pending = false;
       this._updateRows();
       this._showError('No response yet. Check your script before trying again.');
@@ -182,6 +184,7 @@ export class UIPanel extends Panel {
   _clearPending() {
     for (const { row, timer } of this.pending.values()) {
       clearTimeout(timer);
+      row.cancelPending?.();
       row.pending = false;
     }
     this.pending.clear();

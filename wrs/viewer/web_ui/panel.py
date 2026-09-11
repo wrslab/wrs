@@ -105,17 +105,27 @@ class UIPanel:
 
     def add_slider(self, control_id, *, min_value=0, max_value=1, step=0.01,
                    value=0, label=None, unit='', on_change=None,
+                   continuous=False, update_hz=30,
                    group='', enabled=True):
-        """Add a numeric slider; the callback receives a float on commit.
+        """Add a numeric slider; the callback receives a float.
 
         Bounds and step must be finite, with min_value < max_value and step > 0.
         Values are validated against the bounds and snapped to the nearest
         step from min_value. Units are for display only, with no conversion.
+        continuous=True also sends values during dragging, capped at update_hz
+        per slider. Release flushes the final value; slow replies coalesce updates.
+        The default continuous=False sends only committed changes.
         """
         low, high, step = map(protocol.finite_number, (min_value, max_value, step))
         if low >= high or step <= 0 or not math.isfinite((high - low) / step):
             raise ValueError('slider requires finite min < max and step > 0')
-        spec = dict(min=low, max=high, step=step, unit=str(unit))
+        if not isinstance(continuous, bool):
+            raise ValueError('continuous must be a bool')
+        update_hz = protocol.finite_number(update_hz)
+        if update_hz <= 0:
+            raise ValueError('update_hz must be positive')
+        spec = dict(min=low, max=high, step=step, unit=str(unit),
+                    continuous=continuous, update_hz=update_hz)
         spec['value'] = protocol.slider_value(spec, value)
         self._add(control_id, 'slider', label, group, enabled, on_change, **spec)
 
