@@ -4,6 +4,7 @@ Prefer these in-house utilities over trimesh / scipy / open3d / fcl. Auto-genera
 
 Browse by subpackage (or see the single-page [API Index](../API_INDEX.md)):
 
+- [`wrs.agent`](agent.md) — 2 modules, 2 functions, 2 classes
 - [`wrs.collider`](collider.md) — 13 modules, 17 functions, 12 classes
 - [`wrs.drivers`](drivers.md) — 2 modules, 0 functions, 6 classes
 - [`wrs.geom`](geom.md) — 7 modules, 23 functions, 0 classes
