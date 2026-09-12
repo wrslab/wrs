@@ -1,6 +1,7 @@
 import warnings
 import numpy as np
 import wrs.utils.math as wum
+from wrs.motion.core.diagnosis import constraint_detail
 
 
 def linear_to_jpath(
@@ -15,6 +16,7 @@ def linear_to_jpath(
     chain='main',
     tcp='flange',
     ctx=None,
+    diag=None,
 ):
     """
     Convert Cartesian straight-line trajectory to joint trajectory using IK.
@@ -43,6 +45,10 @@ def linear_to_jpath(
         densified motion clips an obstacle. `qs` produced by `robot.ik` must live
         in the same state space as `ctx` (same convention the planners rely on).
         Default None disables checking (pure geometry + IK).
+    diag : Diagnosis, optional
+        Opt-in failure channel (see `wrs.motion.core.diagnosis`): on a None
+        `q_seq`, stamped 'cartesian' with the failing waypoint -- an IK break
+        vs a blocked segment call for different repairs (reorient vs clear).
 
     Returns
     -------
@@ -67,16 +73,24 @@ def linear_to_jpath(
     ref_qs_active = ik_chain.extract_active_qs(ref_qs)
     q_list = []
     prev_qs = None
-    for pos, rotmat in zip(pos_seq, rotmat_seq):
+    for i, (pos, rotmat) in enumerate(zip(pos_seq, rotmat_seq)):
         qs_list = robot.ik(pos, rotmat, chain=chain, tcp=tcp,
                            max_solutions=1, ref_qs=ref_qs_active)
         if not qs_list:
+            if diag is not None:
+                diag.fail('cartesian',
+                          f'ik broke at waypoint {i + 1}/{len(pos_seq)}')
             return None, (pos_seq, rotmat_seq)
         qs = np.asarray(qs_list[0], dtype=np.float32)
         # gate each densified segment as soon as its endpoint is solved, so a
         # colliding move aborts before wasting IK on the rest of the line.
         if ctx is not None and prev_qs is not None \
                 and not ctx.is_motion_valid(prev_qs, qs):
+            if diag is not None:
+                reason = constraint_detail(ctx.constraints)
+                diag.fail('cartesian',
+                          f'blocked at waypoint {i + 1}/{len(pos_seq)}' +
+                          (f' ({reason})' if reason else ''))
             return None, (pos_seq, rotmat_seq)
         q_list.append(qs)
         prev_qs = qs

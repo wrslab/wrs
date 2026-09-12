@@ -20,5 +20,9 @@ dependencies = [
     'websockets>=14',
 ]
 
+[project.optional-dependencies]
+# the task-decomposition harness (wrs.agent) talks to the Claude API
+agent = ['anthropic']
+
 [tool.setuptools.packages.find]
 include = ['one*', 'wrs*']

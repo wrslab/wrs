@@ -9,6 +9,10 @@ accumulates the segments into one ``MotionData`` (``result``).
 The motion steps RETURN their ``MotionData`` (or ``None`` if they -- or an
 earlier step -- can't plan): check the return and stop, no fluent chaining and no
 silent continuation. ``hold`` / ``release`` mutate the held state (no return).
+WHY a step failed is on ``recipe.failure`` (a
+:class:`~wrs.motion.core.diagnosis.Diagnosis` stamped by the primitive that gave
+up) -- the repair channel for a caller that reacts to infeasibility (retry with a
+larger budget, another grasp, an inserted regrasp) instead of just stopping.
 
 This is the ergonomic layer over the orthogonal arm verbs (which stay directly
 usable): every higher-level shape -- pick-and-place, pick-and-hold, regrasp's
@@ -25,6 +29,7 @@ the library needs no combinatorial family of named compositions.
 """
 import numpy as np
 
+from wrs.motion.core.diagnosis import Diagnosis
 from wrs.motion.core.motion_data import MotionData
 
 
@@ -48,6 +53,7 @@ class Recipe:
         self._held = None
         self._segs = []
         self._failed = False
+        self._failure = None
 
     # ---- motion steps (return the planned MotionData, or None) ---------------
     def moveto(self, goal, **kw):
@@ -58,9 +64,11 @@ class Recipe:
         ``.result`` concatenates the successful segments."""
         if self._failed:
             return None
+        diag = self._step_diag('moveto', kw)
         return self._record(self.arm.moveto(
             goal, collider=self.collider, constraints=self.constraints,
-            tcp=self.tcp, start_qs=self._start, ee_qpos=self._ee_qpos, **kw))
+            tcp=self.tcp, start_qs=self._start, ee_qpos=self._ee_qpos,
+            diag=diag, **kw), diag)
 
     def linear(self, goal_pos, goal_rotmat, **kw):
         """Straight cartesian move of the bound tcp to ``(goal_pos, goal_rotmat)``
@@ -68,10 +76,11 @@ class Recipe:
         ``None`` (same contract as :meth:`moveto`)."""
         if self._failed:
             return None
+        diag = self._step_diag('linear', kw)
         return self._record(self.arm.insert(
             goal_pos, goal_rotmat, collider=self.collider, tcp=self.tcp,
             start_qs=self._start, constraints=self.constraints,
-            ee_qpos=self._ee_qpos, **kw))
+            ee_qpos=self._ee_qpos, diag=diag, **kw), diag)
 
     # ---- state steps (mutate the held state; return nothing) -----------------
     def hold(self, obj, *, qpos=None, opening=None, exclude=False):
@@ -127,12 +136,34 @@ class Recipe:
         concatenation. Empty if the Recipe failed."""
         return [] if self._failed else list(self._segs)
 
-    def _record(self, seg):
+    @property
+    def failure(self):
+        """The failed step's :class:`~wrs.motion.core.diagnosis.Diagnosis`
+        (``step`` names the step, ``stage``/``detail``/``counts`` say where the
+        primitive gave up), or None while nothing has failed. The step returns
+        stay the control flow; this is the explanation for a caller that
+        REPAIRS -- e.g. 'ik' with zero candidates wants another pose, 'rrt'
+        wants a larger budget."""
+        return self._failure
+
+    def _step_diag(self, verb, kw):
+        """The Diagnosis for the step about to plan: the caller's own (popped
+        from ``kw`` so the verb isn't passed ``diag`` twice) or a fresh one;
+        either way labeled with the step index + verb."""
+        diag = kw.pop('diag', None)
+        if diag is None:
+            diag = Diagnosis()
+        if diag.step is None:
+            diag.step = f'{len(self._segs)}:{verb}'
+        return diag
+
+    def _record(self, seg, diag=None):
         """Record a planned leg (fill held-object poses, advance the start config)
-        and RETURN the recorded MotionData; on a failed leg set ``_failed`` and
-        return None."""
+        and RETURN the recorded MotionData; on a failed leg set ``_failed`` (and
+        keep the step's ``diag`` as ``failure``) and return None."""
         if seg is None:
             self._failed = True
+            self._failure = diag
             return None
         qlist = seg.robot_qpos_list
         if self._held is not None:           # held object follows the gripper (FK)

@@ -86,7 +86,10 @@ py -3.12 examples/test_bunny.py
 More examples live in [`examples/`](examples/). For the library itself, see
 [`docs/API_INDEX.md`](docs/API_INDEX.md) — a generated map of every public
 function, so in-house utilities are easy to find before reaching for an external
-one.
+one. The manipulation vocabulary — the atomic skills a task-decomposition
+layer calls, with pre/post conditions and failure→repair guidance — is
+[`docs/SKILLS.md`](docs/SKILLS.md) (machine form: `docs/skills.json`),
+generated from the catalog in [`wrs/skills.py`](wrs/skills.py).
 
 ## Interactive viewer controls
 
