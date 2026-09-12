@@ -15,12 +15,15 @@ values: scene objects mutate as a plan runs (fk moves the robot, hold mounts
 the object), so every attempt plans against a fresh build -- no state bleed
 between revisions.
 
-The LLM client is passed explicitly like every other collaborator (default:
-``anthropic.Anthropic()``, resolving credentials from the environment) -- so
-tests inject a fake and pay nothing.
+The LLM client is passed explicitly like every other collaborator; left
+unset, :func:`default_client` picks the API (``anthropic``, when credentials
+are in the environment) or the Claude Code CLI (``claude -p``, the
+developer's subscription login -- no API key needed). Tests inject a fake and
+pay nothing.
 """
 import os
 import re
+import shutil
 
 from wrs.agent.executor import run_script
 
@@ -71,6 +74,23 @@ def _extract_code(text):
     return m.group(1) if m else text
 
 
+def default_client():
+    """The best LLM client this machine can offer, in preference order:
+    the API when credentials are in the environment (``anthropic``), else
+    the Claude Code CLI (``claude -p`` -- the developer's subscription
+    login). Loud, actionable error when neither is available."""
+    if os.environ.get('ANTHROPIC_API_KEY') or os.environ.get(
+            'ANTHROPIC_AUTH_TOKEN'):
+        import anthropic
+        return anthropic.Anthropic()
+    if shutil.which('claude'):
+        from wrs.agent.cli_client import ClaudeCodeClient
+        return ClaudeCodeClient()
+    raise RuntimeError(
+        'no LLM access: export ANTHROPIC_API_KEY (pip install wrs[agent]), '
+        'or install + log in the Claude Code CLI (`claude login`)')
+
+
 def solve(task, build_scene, *, check=None, model='claude-opus-4-8',
           max_rounds=3, client=None, log=print):
     """Decompose ``task`` into a plan over a scene, revising on failure.
@@ -89,8 +109,7 @@ def solve(task, build_scene, *, check=None, model='claude-opus-4-8',
     planned fully and passed ``check``.
     """
     if client is None:
-        import anthropic
-        client = anthropic.Anthropic()
+        client = default_client()
     with open(_MANIFEST, 'r', encoding='utf-8') as f:
         system = _SYSTEM.format(manifest=f.read())
 

@@ -7,5 +7,6 @@ model revises. Kept out of ``wrs/__init__`` on purpose -- the ``anthropic``
 dependency is optional (``pip install wrs[agent]``) and nothing else in the
 library needs it.
 """
+from wrs.agent.cli_client import ClaudeCodeClient
 from wrs.agent.executor import run_script
-from wrs.agent.harness import solve
+from wrs.agent.harness import default_client, solve
