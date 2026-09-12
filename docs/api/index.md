@@ -9,7 +9,7 @@ Browse by subpackage (or see the single-page [API Index](../API_INDEX.md)):
 - [`wrs.geom`](geom.md) — 7 modules, 23 functions, 0 classes
 - [`wrs.grasp`](grasp.md) — 8 modules, 16 functions, 2 classes
 - [`wrs.manipulation`](manipulation.md) — 4 modules, 2 functions, 4 classes
-- [`wrs.motion`](motion.md) — 11 modules, 13 functions, 10 classes
+- [`wrs.motion`](motion.md) — 12 modules, 13 functions, 11 classes
 - [`wrs.physics`](physics.md) — 9 modules, 7 functions, 18 classes
 - [`wrs.robots`](robots.md) — 43 modules, 72 functions, 45 classes
 - [`wrs.scene`](scene.md) — 7 modules, 37 functions, 12 classes

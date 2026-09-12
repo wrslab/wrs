@@ -220,7 +220,7 @@ _Pick-and-place motion planning -- move an object from a pick pose to a place_
 _A manipulation Recipe: compose the primitive arm verbs into one motion._
 
 - **class `Recipe`**
-  - methods: `moveto`, `linear`, `hold`, `release`, `result`, `last_qs`, `segments`
+  - methods: `moveto`, `linear`, `hold`, `release`, `result`, `last_qs`, `segments`, `failure`
 
 ## `wrs.manipulation.workcell`
 _A multi-arm cell: several arms sharing ONE collision world._
@@ -233,6 +233,12 @@ _Planning constraints: state-validity predicates layered on top of collision._
 
 - **class `Constraint`** — A state-validity predicate beyond collision.
   - methods: `is_valid`
+
+## `wrs.motion.core.diagnosis`
+_Why a planning call returned None -- an explicit, opt-in out-channel._
+
+- **class `Diagnosis`** — Where and why one planning call failed. Falsy until ``fail`` stamps it.
+  - methods: `fail`, `as_dict`
 
 ## `wrs.motion.core.motion_data`
 _A plain, composable motion container._
@@ -252,7 +258,7 @@ _A plain, composable motion container._
 
 ## `wrs.motion.interpolation.cartesian`
 
-- `linear_to_jpath(robot, start_rotmat, start_pos, goal_rotmat=None, goal_pos=None, pos_step=0.01, rot_step=np.deg2rad(2.0), ref_qs=None, chain='main', tcp='flange', ctx=None)` — Convert Cartesian straight-line trajectory to joint trajectory using IK.
+- `linear_to_jpath(robot, start_rotmat, start_pos, goal_rotmat=None, goal_pos=None, pos_step=0.01, rot_step=np.deg2rad(2.0), ref_qs=None, chain='main', tcp='flange', ctx=None, diag=None)` — Convert Cartesian straight-line trajectory to joint trajectory using IK.
 - `interp_by_step(start_rotmat, start_pos, goal_rotmat=None, goal_pos=None, pos_step=0.01, rot_step=np.deg2rad(2.0))` — Cartesian straight-line interpolation with automatic sample count.
 - `interp_by_n(start_rotmat, start_pos, goal_rotmat=None, goal_pos=None, n_steps=2)` — Cartesian straight-line interpolation with fixed number of samples.
 
@@ -265,10 +271,10 @@ _A plain, composable motion container._
 ## `wrs.motion.primitives.approach_depart`
 _Approach / depart motion primitives._
 
-- `gen_moveto(robot, ctx, planner, goal, *, tcp=None, start_qs, chain='main', ee_qpos=None, max_iters=2000, time_limit=3.0, shortcut=True)` — Free RRT move from ``start_qs`` to ``goal`` (a config, or a pose IK'd via
-- `nearest_valid_ik(robot, ctx, pos, rotmat, *, chain='main', tcp='flange', ref_qs, max_solutions=8, accept=None)` — IK at ``(pos, rotmat)`` returning the solution nearest ``ref_qs`` (in the
-- `gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs, chain='main', pre_pos=None, pre_rotmat=None, approach_direction=None, approach_distance=0.05, granularity=0.01, ee_qpos=None, use_rrt=True, check_descent=True, max_iters=2000, ik_max_solutions=8, ik_accept=None)` — ``start_qs`` -> pre-grasp (probabilistic) -> grasp (cartesian line).
-- `gen_depart(robot, ctx, planner, start_pos, start_rotmat, *, tcp, start_qs, chain='main', depart_direction=None, depart_distance=0.05, granularity=0.01, ee_qpos=None, end_qs=None, use_rrt=False, check_retreat=True, max_iters=2000)` — ``start_qs`` (at the grasp) -> retreat (cartesian line) -> optional park.
+- `gen_moveto(robot, ctx, planner, goal, *, tcp=None, start_qs, chain='main', ee_qpos=None, max_iters=2000, time_limit=3.0, shortcut=True, diag=None)` — Free RRT move from ``start_qs`` to ``goal`` (a config, or a pose IK'd via
+- `nearest_valid_ik(robot, ctx, pos, rotmat, *, chain='main', tcp='flange', ref_qs, max_solutions=8, accept=None, diag=None)` — IK at ``(pos, rotmat)`` returning the solution nearest ``ref_qs`` (in the
+- `gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs, chain='main', pre_pos=None, pre_rotmat=None, approach_direction=None, approach_distance=0.05, granularity=0.01, ee_qpos=None, use_rrt=True, check_descent=True, max_iters=2000, ik_max_solutions=8, ik_accept=None, diag=None)` — ``start_qs`` -> pre-grasp (probabilistic) -> grasp (cartesian line).
+- `gen_depart(robot, ctx, planner, start_pos, start_rotmat, *, tcp, start_qs, chain='main', depart_direction=None, depart_distance=0.05, granularity=0.01, ee_qpos=None, end_qs=None, use_rrt=False, check_retreat=True, max_iters=2000, diag=None)` — ``start_qs`` (at the grasp) -> retreat (cartesian line) -> optional park.
 
 ## `wrs.motion.probabilistic.post_processor`
 

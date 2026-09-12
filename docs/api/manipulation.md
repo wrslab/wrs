@@ -20,7 +20,7 @@ _Pick-and-place motion planning -- move an object from a pick pose to a place_
 _A manipulation Recipe: compose the primitive arm verbs into one motion._
 
 - **class `Recipe`**
-  - methods: `moveto`, `linear`, `hold`, `release`, `result`, `last_qs`, `segments`
+  - methods: `moveto`, `linear`, `hold`, `release`, `result`, `last_qs`, `segments`, `failure`
 
 ## `wrs.manipulation.workcell`
 _A multi-arm cell: several arms sharing ONE collision world._

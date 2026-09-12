@@ -19,6 +19,11 @@ new collision/IK machinery, just the sequencing that examples used to inline.
 Conventions: pos-first; ``tcp`` is the registered tcp name or a ``TCP`` object IK
 solves against; configs are full qs (the planners' state vector). The approach
 axis defaults to the grasp frame's +z (``goal_rotmat[:, 2]``).
+
+Failure: every entry point returns None on infeasibility (the library-wide
+contract). Pass a :class:`~wrs.motion.core.diagnosis.Diagnosis` as ``diag=`` to
+additionally learn WHERE the pipeline gave up (its stage vocabulary) -- the
+opt-in repair channel; omitted, nothing is recorded.
 """
 import numpy as np
 
@@ -28,7 +33,8 @@ import wrs.motion.probabilistic.rrt as wmpr
 from wrs.motion.core.motion_data import MotionData
 
 
-def _as_goal_conf(robot, ctx, goal, *, tcp, chain, ref_qs, ik_max_solutions=16):
+def _as_goal_conf(robot, ctx, goal, *, tcp, chain, ref_qs, ik_max_solutions=16,
+                  diag=None):
     """Resolve ``goal`` to a full joint config: a config array is returned as-is;
     a pose (``(pos, rotmat)`` or a 4x4 tf) is IK'd via ``tcp`` to the collision-
     free solution nearest ``ref_qs`` (None if unreachable / all colliding)."""
@@ -47,28 +53,40 @@ def _as_goal_conf(robot, ctx, goal, *, tcp, chain, ref_qs, ik_max_solutions=16):
     if tcp is None:
         raise ValueError("moveto to a pose needs a tcp")
     return nearest_valid_ik(robot, ctx, pos, rotmat, chain=chain, tcp=tcp,
-                            ref_qs=ref_qs, max_solutions=ik_max_solutions)
+                            ref_qs=ref_qs, max_solutions=ik_max_solutions,
+                            diag=diag)
 
 
 def gen_moveto(robot, ctx, planner, goal, *, tcp=None, start_qs, chain='main',
-               ee_qpos=None, max_iters=2000, time_limit=3.0, shortcut=True):
+               ee_qpos=None, max_iters=2000, time_limit=3.0, shortcut=True,
+               diag=None):
     """Free RRT move from ``start_qs`` to ``goal`` (a config, or a pose IK'd via
     ``tcp``) under ``ctx`` (collision + constraints). ``time_limit`` caps the RRT
     wall-clock per call (so an expensive gate like a per-edge cable ray-cast can't
     stall the search). With ``shortcut`` the RRT path is shortcut + re-densified
     (kept ``ctx``-valid). Returns a MotionData (held at ``ee_qpos``) or None if
-    unreachable / no path. The free-space primitive every transfer leg builds on."""
+    unreachable / no path (``diag`` stamped: 'ik' / 'start_invalid' /
+    'goal_invalid' / 'rrt'). The free-space primitive every transfer leg builds
+    on."""
     start_qs = np.asarray(start_qs, dtype=np.float32)
     goal_qs = _as_goal_conf(robot, ctx, goal, tcp=tcp, chain=chain,
-                            ref_qs=start_qs)
+                            ref_qs=start_qs, diag=diag)
     if goal_qs is None:
+        return None                       # diag stamped 'ik' by nearest_valid_ik
+    if not ctx.is_state_valid(np.asarray(start_qs, dtype=np.float64)):
+        if diag is not None:
+            diag.fail('start_invalid')
         return None
-    if (not ctx.is_state_valid(np.asarray(start_qs, dtype=np.float64))
-            or not ctx.is_state_valid(np.asarray(goal_qs, dtype=np.float64))):
+    if not ctx.is_state_valid(np.asarray(goal_qs, dtype=np.float64)):
+        if diag is not None:
+            diag.fail('goal_invalid')
         return None
     path = planner.solve(start_qs, goal_qs, max_iters=max_iters,
                          time_limit=time_limit)
     if not path:
+        if diag is not None:
+            diag.fail('rrt', f'no path (max_iters={max_iters}, '
+                             f'time_limit={time_limit}s)')
         return None
     path = list(path)
     if shortcut:
@@ -88,24 +106,33 @@ def _unit(v):
 
 
 def nearest_valid_ik(robot, ctx, pos, rotmat, *, chain='main', tcp='flange',
-                     ref_qs, max_solutions=8, accept=None):
+                     ref_qs, max_solutions=8, accept=None, diag=None):
     """IK at ``(pos, rotmat)`` returning the solution nearest ``ref_qs`` (in the
     chain's active-joint space) that is collision-free under ``ctx`` (and passes
-    the optional ``accept(full_qs)`` predicate). Full qs, or None if none qualify.
-    ``ctx=None`` skips the collision gate (pure kinematics)."""
+    the optional ``accept(full_qs)`` predicate). Full qs, or None if none qualify
+    (``diag`` stamped 'ik' with candidates / invalid / rejected counts: zero
+    candidates reads "unreachable", all-invalid reads "blocked"). ``ctx=None``
+    skips the collision gate (pure kinematics)."""
     ik_chain = robot.chain(chain)
     ref_active = ik_chain.extract_active_qs(np.asarray(ref_qs, dtype=np.float32))
     best, best_d = None, None
+    n_cand = n_invalid = n_rejected = 0
     for s in robot.ik(pos, rotmat, chain=chain, tcp=tcp,
                       ref_qs=ref_active, max_solutions=max_solutions):
+        n_cand += 1
         s64 = np.asarray(s, dtype=np.float64)
         if ctx is not None and not ctx.is_state_valid(s64):
+            n_invalid += 1
             continue
         if accept is not None and not accept(s64):
+            n_rejected += 1
             continue
         d = float(np.linalg.norm(ik_chain.extract_active_qs(s) - ref_active))
         if best_d is None or d < best_d:
             best, best_d = np.asarray(s, dtype=np.float32), d
+    if best is None and diag is not None:
+        diag.fail('ik', candidates=n_cand, invalid=n_invalid,
+                  rejected=n_rejected)
     return best
 
 
@@ -114,7 +141,7 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
                  approach_direction=None, approach_distance=0.05,
                  granularity=0.01, ee_qpos=None, use_rrt=True,
                  check_descent=True, max_iters=2000, ik_max_solutions=8,
-                 ik_accept=None):
+                 ik_accept=None, diag=None):
     """``start_qs`` -> pre-grasp (probabilistic) -> grasp (cartesian line).
 
     The pre-grasp is ``goal`` retreated ``approach_distance`` along
@@ -132,7 +159,8 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
          is a collision body, e.g. l1picking) so the contact is not flagged.
 
     Returns a MotionData (end-effector held at ``ee_qpos`` throughout) ending at the
-    grasp config, or None if any stage is infeasible.
+    grasp config, or None if any stage is infeasible (``diag`` stamped: 'ik' the
+    pre-grasp, 'rrt' / 'joint_line' the travel, 'cartesian' the descent).
     """
     goal_pos = np.asarray(goal_pos, dtype=np.float32)
     goal_rotmat = np.asarray(goal_rotmat, dtype=np.float32)
@@ -147,18 +175,25 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
 
     q_pre = nearest_valid_ik(robot, ctx, pre_pos, pre_rotmat, chain=chain,
                              tcp=tcp, ref_qs=start_qs,
-                             max_solutions=ik_max_solutions, accept=ik_accept)
+                             max_solutions=ik_max_solutions, accept=ik_accept,
+                             diag=diag)
     if q_pre is None:
+        if diag is not None:
+            diag.detail = 'pre-grasp pose'
         return None
 
     if use_rrt:
         path = planner.solve(start_qs, q_pre, max_iters=max_iters)
         if not path:
+            if diag is not None:
+                diag.fail('rrt', f'travel to pre-grasp (max_iters={max_iters})')
             return None
         travel = MotionData.from_jpath(path, ee_qpos)
     else:
         seg = wmij.linear_path(start_qs, q_pre, ctx=ctx)
         if seg is None:
+            if diag is not None:
+                diag.fail('joint_line', 'travel to pre-grasp')
             return None
         travel = MotionData.from_jpath(seg, ee_qpos)
 
@@ -166,8 +201,10 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
         robot=robot, start_rotmat=pre_rotmat, start_pos=pre_pos,
         goal_rotmat=goal_rotmat, goal_pos=goal_pos, ref_qs=q_pre,
         chain=chain, tcp=tcp, pos_step=granularity,
-        ctx=(ctx if check_descent else None))
+        ctx=(ctx if check_descent else None), diag=diag)
     if q_seq is None:
+        if diag is not None:
+            diag.detail = f'descent: {diag.detail}'
         return None
     return travel + MotionData.from_jpath(q_seq, ee_qpos)
 
@@ -175,7 +212,7 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
 def gen_depart(robot, ctx, planner, start_pos, start_rotmat, *, tcp, start_qs,
                chain='main', depart_direction=None, depart_distance=0.05,
                granularity=0.01, ee_qpos=None, end_qs=None, use_rrt=False,
-               check_retreat=True, max_iters=2000):
+               check_retreat=True, max_iters=2000, diag=None):
     """``start_qs`` (at the grasp) -> retreat (cartesian line) -> optional park.
 
     A straight cartesian move of ``depart_distance`` along ``depart_direction``
@@ -185,7 +222,8 @@ def gen_depart(robot, ctx, planner, start_pos, start_rotmat, *, tcp, start_qs,
     ``check_retreat`` gates the cartesian leg with ``ctx`` (pass False when still
     in intended contact with the target, mirroring ``gen_approach``).
 
-    Returns a MotionData (end-effector held at ``ee_qpos``) or None if infeasible.
+    Returns a MotionData (end-effector held at ``ee_qpos``) or None if infeasible
+    (``diag`` stamped: 'cartesian' the retreat, 'rrt' the park leg).
     """
     start_pos = np.asarray(start_pos, dtype=np.float32)
     start_rotmat = np.asarray(start_rotmat, dtype=np.float32)
@@ -197,8 +235,10 @@ def gen_depart(robot, ctx, planner, start_pos, start_rotmat, *, tcp, start_qs,
         robot=robot, start_rotmat=start_rotmat, start_pos=start_pos,
         goal_rotmat=start_rotmat, goal_pos=end_pos, ref_qs=start_qs,
         chain=chain, tcp=tcp, pos_step=granularity,
-        ctx=(ctx if check_retreat else None))
+        ctx=(ctx if check_retreat else None), diag=diag)
     if q_seq is None:
+        if diag is not None:
+            diag.detail = f'retreat: {diag.detail}'
         return None
     md = MotionData.from_jpath(q_seq, ee_qpos)
 
@@ -206,6 +246,8 @@ def gen_depart(robot, ctx, planner, start_pos, start_rotmat, *, tcp, start_qs,
         path = planner.solve(md.robot_qpos_list[-1], np.asarray(end_qs, np.float32),
                              max_iters=max_iters)
         if not path:
+            if diag is not None:
+                diag.fail('rrt', f'park leg (max_iters={max_iters})')
             return None
         md = md + MotionData.from_jpath(path, ee_qpos)
     return md

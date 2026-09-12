@@ -164,10 +164,12 @@ class SingleArmManipulation:
                                   which=which, **kw)
 
     # ---- reachability (a cheap gate before motion planning) ------------------
-    def reachable(self, goal, *, collider, tcp, constraints=(), ref_qs=None):
+    def reachable(self, goal, *, collider, tcp, constraints=(), ref_qs=None,
+                  diag=None):
         """The nearest collision-free (and ``constraints``-satisfying) IK config
         for ``goal`` (a ``(pos, rotmat)`` pair or 4x4 tcp pose) in ``collider``,
-        or None if unreachable. A CHEAP feasibility gate to run before the
+        or None if unreachable (``diag``'s counts then split unreachable vs
+        blocked). A CHEAP feasibility gate to run before the
         expensive ``moveto`` -- e.g. confirm every key pose of a multi-arm recipe
         has an IK before planning any leg. ``ref_qs`` biases the branch chosen."""
         ctx, _ = self._context(collider, constraints)
@@ -176,21 +178,23 @@ class SingleArmManipulation:
             tcp = self.body.tcp(tcp)
         if ref_qs is None:
             ref_qs = np.asarray(self.body.qs, dtype=np.float32)
-        g = np.asarray(goal, dtype=np.float32)
-        if g.shape == (4, 4):
-            pos, rotmat = g[:3, 3], g[:3, :3]
-        else:
+        if isinstance(goal, (tuple, list)) and len(goal) == 2:
             pos, rotmat = goal
+        else:
+            g = np.asarray(goal, dtype=np.float32)
+            pos, rotmat = g[:3, 3], g[:3, :3]
         return nearest_valid_ik(self.body, ctx, pos, rotmat, chain=self.arm_chain,
-                                tcp=tcp, ref_qs=ref_qs)
+                                tcp=tcp, ref_qs=ref_qs, diag=diag)
 
     # ---- primitive motions ---------------------------------------------------
     def moveto(self, goal, *, collider, tcp=None, constraints=(), start_qs=None,
-               ee_qpos=None, max_iters=2000, time_limit=3.0, shortcut=True):
+               ee_qpos=None, max_iters=2000, time_limit=3.0, shortcut=True,
+               diag=None):
         """Free RRT move to ``goal`` -- a full joint config, or a tcp pose
         (``(pos, rotmat)`` / 4x4) IK'd via ``tcp`` -- in ``collider``, gated by
         ``constraints``. From ``start_qs`` (default: current). Returns a
-        MotionData (held at ``ee_qpos``) or None. ``shortcut=False`` skips the
+        MotionData (held at ``ee_qpos``) or None (why -- pass a ``diag``, see
+        :mod:`wrs.motion.core.diagnosis`). ``shortcut=False`` skips the
         path smoothing (a coarse but valid path) -- useful in a FEASIBILITY search
         where only existence matters; smooth the chosen result with ``True``. The
         free-space primitive the :class:`Recipe` builds on; ``str`` ``tcp``
@@ -204,7 +208,7 @@ class SingleArmManipulation:
         return gen_moveto(self.body, ctx, planner, goal, tcp=tcp,
                           start_qs=start_qs, chain=self.arm_chain,
                           ee_qpos=ee_qpos, max_iters=max_iters,
-                          time_limit=time_limit, shortcut=shortcut)
+                          time_limit=time_limit, shortcut=shortcut, diag=diag)
 
     def approach(self, goal_pos, goal_rotmat, *, collider, tcp, constraints=(),
                  start_qs=None, **kw):
