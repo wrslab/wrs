@@ -11,6 +11,7 @@ _Planning constraints: state-validity predicates layered on top of collision._
 ## `wrs.motion.core.diagnosis`
 _Why a planning call returned None -- an explicit, opt-in out-channel._
 
+- `constraint_detail(constraints)` — Why a constraint rejected the last validity check: the FIRST non-None
 - **class `Diagnosis`** — Where and why one planning call failed. Falsy until ``fail`` stamps it.
   - methods: `fail`, `as_dict`
 

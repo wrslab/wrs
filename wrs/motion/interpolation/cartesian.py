@@ -1,6 +1,7 @@
 import warnings
 import numpy as np
 import wrs.utils.math as wum
+from wrs.motion.core.diagnosis import constraint_detail
 
 
 def linear_to_jpath(
@@ -86,8 +87,10 @@ def linear_to_jpath(
         if ctx is not None and prev_qs is not None \
                 and not ctx.is_motion_valid(prev_qs, qs):
             if diag is not None:
+                reason = constraint_detail(ctx.constraints)
                 diag.fail('cartesian',
-                          f'blocked at waypoint {i + 1}/{len(pos_seq)}')
+                          f'blocked at waypoint {i + 1}/{len(pos_seq)}' +
+                          (f' ({reason})' if reason else ''))
             return None, (pos_seq, rotmat_seq)
         q_list.append(qs)
         prev_qs = qs

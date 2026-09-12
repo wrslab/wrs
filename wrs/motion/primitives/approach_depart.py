@@ -30,6 +30,7 @@ import numpy as np
 import wrs.motion.interpolation.cartesian as wmic
 import wrs.motion.interpolation.joint as wmij
 import wrs.motion.probabilistic.rrt as wmpr
+from wrs.motion.core.diagnosis import constraint_detail
 from wrs.motion.core.motion_data import MotionData
 
 
@@ -75,11 +76,11 @@ def gen_moveto(robot, ctx, planner, goal, *, tcp=None, start_qs, chain='main',
         return None                       # diag stamped 'ik' by nearest_valid_ik
     if not ctx.is_state_valid(np.asarray(start_qs, dtype=np.float64)):
         if diag is not None:
-            diag.fail('start_invalid')
+            diag.fail('start_invalid', constraint_detail(ctx.constraints))
         return None
     if not ctx.is_state_valid(np.asarray(goal_qs, dtype=np.float64)):
         if diag is not None:
-            diag.fail('goal_invalid')
+            diag.fail('goal_invalid', constraint_detail(ctx.constraints))
         return None
     path = planner.solve(start_qs, goal_qs, max_iters=max_iters,
                          time_limit=time_limit)
@@ -117,12 +118,15 @@ def nearest_valid_ik(robot, ctx, pos, rotmat, *, chain='main', tcp='flange',
     ref_active = ik_chain.extract_active_qs(np.asarray(ref_qs, dtype=np.float32))
     best, best_d = None, None
     n_cand = n_invalid = n_rejected = 0
+    cons_reason = ''
     for s in robot.ik(pos, rotmat, chain=chain, tcp=tcp,
                       ref_qs=ref_active, max_solutions=max_solutions):
         n_cand += 1
         s64 = np.asarray(s, dtype=np.float64)
         if ctx is not None and not ctx.is_state_valid(s64):
             n_invalid += 1
+            if not cons_reason:
+                cons_reason = constraint_detail(ctx.constraints)
             continue
         if accept is not None and not accept(s64):
             n_rejected += 1
@@ -131,7 +135,7 @@ def nearest_valid_ik(robot, ctx, pos, rotmat, *, chain='main', tcp='flange',
         if best_d is None or d < best_d:
             best, best_d = np.asarray(s, dtype=np.float32), d
     if best is None and diag is not None:
-        diag.fail('ik', candidates=n_cand, invalid=n_invalid,
+        diag.fail('ik', cons_reason, candidates=n_cand, invalid=n_invalid,
                   rejected=n_rejected)
     return best
 
@@ -179,7 +183,8 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
                              diag=diag)
     if q_pre is None:
         if diag is not None:
-            diag.detail = 'pre-grasp pose'
+            diag.detail = ('pre-grasp pose' +
+                           (f': {diag.detail}' if diag.detail else ''))
         return None
 
     if use_rrt:
@@ -193,7 +198,9 @@ def gen_approach(robot, ctx, planner, goal_pos, goal_rotmat, *, tcp, start_qs,
         seg = wmij.linear_path(start_qs, q_pre, ctx=ctx)
         if seg is None:
             if diag is not None:
-                diag.fail('joint_line', 'travel to pre-grasp')
+                reason = constraint_detail(ctx.constraints)
+                diag.fail('joint_line', 'travel to pre-grasp' +
+                          (f' ({reason})' if reason else ''))
             return None
         travel = MotionData.from_jpath(seg, ee_qpos)
 

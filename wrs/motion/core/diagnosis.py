@@ -31,9 +31,29 @@ Stage vocabulary -- one entry per DISTINCT repair strategy, deliberately few:
                      broke -- an IK discontinuity or a collision along the
                      line; ``detail`` names the leg and the waypoint.
 
+When a rejection came from a :class:`~wrs.motion.core.constraint.Constraint`
+rather than a collision, the constraint's ``last_fail`` reason string (its own
+diagnostic contract) is folded into ``detail`` via :func:`constraint_detail`
+-- "blocked by the wall" and "blocked by the cable length" call for different
+repairs.
+
 :class:`~wrs.manipulation.recipe.Recipe` threads one Diagnosis per motion step
 automatically and exposes the failed step's record as ``recipe.failure``.
 """
+
+
+def constraint_detail(constraints):
+    """Why a constraint rejected the last validity check: the FIRST non-None
+    ``last_fail`` in evaluation order, or ''. Read RIGHT AFTER the failed
+    check: evaluation short-circuits at the rejector (everything before it
+    passed and cleared its ``last_fail``), so the first reason found is the
+    actual rejector -- later entries may be stale from earlier calls. An
+    all-None scan means the rejection was collision/bounds, not a constraint."""
+    for c in constraints:
+        reason = getattr(c, 'last_fail', None)
+        if reason:
+            return reason
+    return ''
 
 
 class Diagnosis:
