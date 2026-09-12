@@ -72,11 +72,6 @@ class Diagnosis:
         self.detail = detail
         self.counts = dict(counts)
 
-    def as_dict(self):
-        """The machine-readable form (for logs / a task-decomposition layer)."""
-        return {'step': self.step, 'stage': self.stage,
-                'detail': self.detail, **self.counts}
-
     def __bool__(self):
         return self.stage is not None
 
